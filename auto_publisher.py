@@ -567,13 +567,41 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
     log.info("Unposted Remaining: %d", remaining_unposted)
 
     # 1. Facebook Page
-    fb_res = publish_facebook(target_item, poster_path, caption, dry_run)
+    if target_item.get("fb_post_url"):
+        log.info("[Facebook] Already published for %s: %s (Skipping re-post)", item_id, target_item["fb_post_url"])
+        fb_res = {
+            "success": True,
+            "post_id": target_item.get("fb_post_id"),
+            "post_url": target_item.get("fb_post_url"),
+            "cdn_image_url": target_item.get("cdn_image_url"),
+        }
+    else:
+        fb_res = publish_facebook(target_item, poster_path, caption, dry_run)
+        if fb_res.get("success") and not dry_run:
+            target_item["fb_post_id"]   = fb_res.get("post_id")
+            target_item["fb_post_url"]  = fb_res.get("post_url", "")
+            target_item["cdn_image_url"] = fb_res.get("cdn_image_url")
+            save_schedule(schedule)
+
     fb_post_id  = fb_res.get("post_id")
     fb_post_url = fb_res.get("post_url", "")
-    cdn_img_url = fb_res.get("cdn_image_url")
+    cdn_img_url = fb_res.get("cdn_image_url") or target_item.get("cdn_image_url")
 
     # 2. Instagram
-    ig_res = publish_instagram(target_item, cdn_img_url or "", caption, dry_run)
+    if target_item.get("ig_post_url"):
+        log.info("[Instagram] Already published for %s: %s (Skipping re-post)", item_id, target_item["ig_post_url"])
+        ig_res = {
+            "success": True,
+            "media_id": target_item.get("ig_media_id"),
+            "post_url": target_item.get("ig_post_url"),
+        }
+    else:
+        ig_res = publish_instagram(target_item, cdn_img_url or "", caption, dry_run)
+        if ig_res.get("success") and not dry_run:
+            target_item["ig_media_id"] = ig_res.get("media_id")
+            target_item["ig_post_url"] = ig_res.get("post_url", "")
+            save_schedule(schedule)
+
     ig_media_id = ig_res.get("media_id")
     ig_post_url = ig_res.get("post_url", "")
 
@@ -581,22 +609,37 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
     group_caption = build_whatsapp_caption(target_item, is_preview=False, is_admin=False)
     admin_caption = build_whatsapp_caption(target_item, is_preview=False, is_admin=True, remaining_unposted=remaining_unposted)
 
-    log.info("[WhatsApp] [1/2] Sending to Public Group: %s", WHATSAPP_GROUP)
-    g_ok = dispatch_whatsapp_media(WHATSAPP_GROUP, poster_path, group_caption, tag="group_public", dry_run=dry_run)
-    time.sleep(5)
+    g_ok = target_item.get("wa_group_sent", False)
+    if g_ok:
+        log.info("[WhatsApp] Public Group already sent for %s (Skipping re-send)", item_id)
+    else:
+        log.info("[WhatsApp] [1/2] Sending to Public Group: %s", WHATSAPP_GROUP)
+        g_ok = dispatch_whatsapp_media(WHATSAPP_GROUP, poster_path, group_caption, tag="group_public", dry_run=dry_run)
+        if g_ok and not dry_run:
+            target_item["wa_group_sent"] = True
+            save_schedule(schedule)
+        time.sleep(5)
 
-    log.info("[WhatsApp] [2/2] Sending to Personal WhatsApp: %s", WHATSAPP_ADMIN)
-    a_ok = dispatch_whatsapp_media(WHATSAPP_ADMIN, poster_path, admin_caption, tag="admin_personal", dry_run=dry_run)
+    a_ok = target_item.get("wa_admin_sent", False)
+    if a_ok:
+        log.info("[WhatsApp] Personal Admin already sent for %s (Skipping re-send)", item_id)
+    else:
+        log.info("[WhatsApp] [2/2] Sending to Personal WhatsApp: %s", WHATSAPP_ADMIN)
+        a_ok = dispatch_whatsapp_media(WHATSAPP_ADMIN, poster_path, admin_caption, tag="admin_personal", dry_run=dry_run)
+        if a_ok and not dry_run:
+            target_item["wa_admin_sent"] = True
+            save_schedule(schedule)
 
     any_success = fb_res.get("success") or ig_res.get("success") or g_ok or a_ok
     if any_success and not dry_run:
         target_item["status"]       = "published"
-        target_item["published_at"] = datetime.now().isoformat()
+        if not target_item.get("published_at"):
+            target_item["published_at"] = datetime.now().isoformat()
         target_item["fb_post_id"]   = fb_post_id
         target_item["fb_post_url"]  = fb_post_url
         target_item["ig_media_id"]  = ig_media_id
         target_item["ig_post_url"]  = ig_post_url
-        target_item["wa_sent"]      = g_ok and a_ok
+        target_item["wa_sent"]      = bool(g_ok and a_ok)
         save_schedule(schedule)
 
         # Update Website Data & Auto Git Sync
@@ -657,6 +700,11 @@ def run_stage_b_prepare_tomorrow(schedule: list, dry_run: bool = False) -> dict 
     if not candidate:
         log.warning("[Stage B] No unposted videos remaining in queue!")
         return None
+
+    # Invariant: Strictly only ONE item can ever be in 'preview_approved' status
+    for item in schedule:
+        if item.get("status") == "preview_approved" and item.get("id") != candidate["id"]:
+            item["status"] = "pending"
 
     candidate["status"] = "preview_approved"
     poster_path = ensure_poster_exists(candidate)
@@ -727,6 +775,11 @@ def run_skip_tomorrow(schedule: list, dry_run: bool = False):
         save_schedule(schedule)
         return
 
+    # Invariant: Strictly only ONE item can ever be in 'preview_approved' status
+    for item in schedule:
+        if item.get("status") == "preview_approved" and item.get("id") != next_candidate["id"]:
+            item["status"] = "pending"
+
     next_candidate["status"] = "preview_approved"
     poster_path = ensure_poster_exists(next_candidate)
     remaining_unposted = sum(1 for i in schedule if i.get("status") not in ("published", "skipped") and i.get("id") != next_candidate["id"])
@@ -748,6 +801,80 @@ def run_skip_tomorrow(schedule: list, dry_run: bool = False):
 
 
 # ---------------------------------------------------------------------------- #
+#  WhatsApp-Only Dispatch                                                        #
+# ---------------------------------------------------------------------------- #
+
+def run_whatsapp_only(schedule: list, dry_run: bool = False) -> bool:
+    """
+    Dispatches WhatsApp media (Public Group + Admin) for the target video only.
+    Useful for retrying WhatsApp delivery without re-posting to Facebook or Instagram.
+    """
+    section("WHATSAPP-ONLY DISPATCH")
+
+    target_item = None
+    # 1. Look for preview_approved item
+    for item in schedule:
+        if item.get("status") == "preview_approved":
+            target_item = item
+            break
+
+    # 2. Look for item published today
+    if not target_item:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        for item in schedule:
+            if item.get("status") == "published" and (item.get("published_at") or "").startswith(today_str):
+                target_item = item
+                break
+
+    # 3. Fallback to first unposted item
+    if not target_item:
+        for item in schedule:
+            if item.get("status") not in ("published", "skipped"):
+                target_item = item
+                break
+
+    if not target_item:
+        log.warning("[WhatsApp Only] No items found in queue.")
+        return False
+
+    item_id = target_item["id"]
+    poster_path = ensure_poster_exists(target_item)
+    remaining_unposted = sum(1 for i in schedule if i.get("status") not in ("published", "skipped") and i.get("id") != item_id)
+    group_caption = build_whatsapp_caption(target_item, is_preview=False, is_admin=False)
+    admin_caption = build_whatsapp_caption(target_item, is_preview=False, is_admin=True, remaining_unposted=remaining_unposted)
+
+    log.info("[WhatsApp Only] Target: %s (%s)", item_id, target_item.get("title", "")[:40])
+
+    g_ok = target_item.get("wa_group_sent", False)
+    if g_ok:
+        log.info("[WhatsApp] Public Group already marked sent for %s. Skipping re-send.", item_id)
+    else:
+        log.info("[WhatsApp] [1/2] Sending to Public Group: %s", WHATSAPP_GROUP)
+        g_ok = dispatch_whatsapp_media(WHATSAPP_GROUP, poster_path, group_caption, tag="group_public", dry_run=dry_run)
+        if g_ok and not dry_run:
+            target_item["wa_group_sent"] = True
+            save_schedule(schedule)
+        time.sleep(5)
+
+    a_ok = target_item.get("wa_admin_sent", False)
+    if a_ok:
+        log.info("[WhatsApp] Personal Admin already marked sent for %s. Skipping re-send.", item_id)
+    else:
+        log.info("[WhatsApp] [2/2] Sending to Personal WhatsApp: %s", WHATSAPP_ADMIN)
+        a_ok = dispatch_whatsapp_media(WHATSAPP_ADMIN, poster_path, admin_caption, tag="admin_personal", dry_run=dry_run)
+        if a_ok and not dry_run:
+            target_item["wa_admin_sent"] = True
+            target_item["wa_sent"] = bool(g_ok and a_ok)
+            save_schedule(schedule)
+
+    section(f"WHATSAPP-ONLY SUMMARY for {item_id}")
+    print(f"  WhatsApp Group : {'[OK]' if g_ok else '[FAIL]'}")
+    print(f"  WhatsApp Admin : {'[OK]' if a_ok else '[FAIL]'}")
+
+    return bool(g_ok or a_ok)
+
+
+# ---------------------------------------------------------------------------- #
 #  Main CLI Entrypoint                                                           #
 # ---------------------------------------------------------------------------- #
 
@@ -761,6 +888,8 @@ def main():
                         help="Skip currently approved preview, pick next unposted, and send replacement")
     parser.add_argument("--publish-next",      action="store_true",
                         help="Publish next/approved item now")
+    parser.add_argument("--whatsapp-only",     action="store_true",
+                        help="Send only WhatsApp messages without touching Facebook or Instagram")
     parser.add_argument("--dry-run",           action="store_true",
                         help="Simulate without real API calls")
     parser.add_argument("--force",             action="store_true",
@@ -777,6 +906,10 @@ def main():
             sys.exit(1)
 
     schedule = load_schedule()
+
+    if args.whatsapp_only:
+        run_whatsapp_only(schedule, dry_run=DRY_RUN)
+        return
 
     if args.skip_tomorrow:
         run_skip_tomorrow(schedule, dry_run=DRY_RUN)
@@ -801,6 +934,7 @@ def main():
     print("  --prepare-tomorrow  : Prepare & send tomorrow's preview to Personal WhatsApp")
     print("  --skip-tomorrow     : Skip current tomorrow preview and select next video")
     print("  --publish-next      : Publish next item")
+    print("  --whatsapp-only     : Dispatch to WhatsApp only (safe retry)")
 
 
 if __name__ == "__main__":

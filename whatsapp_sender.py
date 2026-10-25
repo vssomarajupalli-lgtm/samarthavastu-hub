@@ -220,7 +220,12 @@ def send_whatsapp_media(
     click_y = int(screen_h * 0.87) if screen_h != 1080 else 940
     log.info("[WhatsApp Sender] Focusing message input box at (%d, %d)...", click_x, click_y)
     pyautogui.click(click_x, click_y)
-    time.sleep(1.0)
+    time.sleep(0.5)
+    # Clear any residual/interrupted text before pasting
+    pyautogui.hotkey("ctrl", "a")
+    time.sleep(0.1)
+    pyautogui.press("backspace")
+    time.sleep(0.5)
 
     # Step e: Copy image (CF_DIB) and paste via Ctrl+V
     copy_image_to_clipboard(img_path)
@@ -241,6 +246,11 @@ def send_whatsapp_media(
     log.info("[WhatsApp Sender] Copying full Telugu caption to clipboard...")
     pyperclip.copy(caption)
     time.sleep(0.5)
+    # Clear modal caption box to prevent mixed or duplicate text
+    pyautogui.hotkey("ctrl", "a")
+    time.sleep(0.1)
+    pyautogui.press("backspace")
+    time.sleep(0.2)
     log.info("[WhatsApp Sender] Pasting caption via Ctrl+V...")
     pyautogui.hotkey("ctrl", "v")
     time.sleep(2.0)

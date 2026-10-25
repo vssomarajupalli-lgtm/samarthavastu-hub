@@ -576,9 +576,20 @@ def sync_youtube(force_poster: bool = True) -> dict:
         order = item.get("discovery_order", 9999)
         return (ud, -order)
 
-    # If an item is already marked 'preview_approved', preserve it at the head
+    # If an item is already marked 'preview_approved', preserve it at the head.
+    # Enforce Invariant: Strictly only ONE item can ever be in 'preview_approved' status.
     approved_items = [i for i in pending_items if i.get("status") == "preview_approved"]
     pure_pending   = [i for i in pending_items if i.get("status") != "preview_approved"]
+    if len(approved_items) > 1:
+        log.warning(
+            "Found %d preview_approved items; keeping only the first and resetting others to pending.",
+            len(approved_items),
+        )
+        for extra in approved_items[1:]:
+            extra["status"] = "pending"
+        pure_pending = approved_items[1:] + pure_pending
+        approved_items = approved_items[:1]
+
     pure_pending.sort(key=pending_sort_key, reverse=True)
     pending_items = approved_items + pure_pending
 

@@ -67,14 +67,20 @@ def fetch_thumbnail_base64(video_id: str, fallback_url: str = "") -> str:
         f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
         f"https://img.youtube.com/vi/{video_id}/sddefault.jpg",
         f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+        f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg",
+        f"https://img.youtube.com/vi/{video_id}/0.jpg",
     ]
-    if fallback_url:
+    if fallback_url and fallback_url not in urls:
         urls.append(fallback_url)
 
     for url in urls:
         try:
             resp = requests.get(url, timeout=10)
-            if resp.status_code == 200 and len(resp.content) > 4000:
+            if resp.status_code == 200 and len(resp.content) > 1000:
+                # Inspect image dimensions with PIL to reject YouTube's 120x90 placeholder
+                img = Image.open(io.BytesIO(resp.content))
+                if img.size == (120, 90) or img.size[0] < 200:
+                    continue
                 b64 = base64.b64encode(resp.content).decode()
                 return f"data:image/jpeg;base64,{b64}"
         except Exception:
@@ -95,6 +101,23 @@ def build_poster_html(item: dict) -> str:
 
     qr_b64 = generate_qr_base64(yt_url)
     thumb_b64 = fetch_thumbnail_base64(video_id, item.get("thumbnail_url", ""))
+
+    title_len = len(title)
+    if title_len > 125:
+        title_font_size = "23px"
+        title_line_height = "1.36"
+        title_padding = "10px 24px"
+        line_clamp = "4"
+    elif title_len > 80:
+        title_font_size = "28px"
+        title_line_height = "1.42"
+        title_padding = "14px 26px"
+        line_clamp = "3"
+    else:
+        title_font_size = "34px"
+        title_line_height = "1.48"
+        title_padding = "18px 30px"
+        line_clamp = "3"
 
     html = f"""<!DOCTYPE html>
 <html lang="te">
@@ -243,7 +266,7 @@ body {{
     background: linear-gradient(180deg, rgba(26, 6, 6, 0.92) 0%, rgba(14, 3, 3, 0.96) 100%);
     border: 1.5px solid rgba(212, 160, 23, 0.6);
     border-radius: 14px;
-    padding: 18px 30px;
+    padding: {title_padding};
     display: flex;
     align-items: center;
     justify-content: center;
@@ -251,13 +274,13 @@ body {{
 }}
 
 .video-title {{
-    font-size: 34px;
+    font-size: {title_font_size};
     font-weight: 700;
-    line-height: 1.48;
+    line-height: {title_line_height};
     color: #fff9ea;
     text-align: center;
     display: -webkit-box;
-    -webkit-line-clamp: 3;
+    -webkit-line-clamp: {line_clamp};
     -webkit-box-orient: vertical;
     overflow: hidden;
     text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
