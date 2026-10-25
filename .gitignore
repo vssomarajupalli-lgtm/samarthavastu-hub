@@ -1,0 +1,28 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+token_result.json
+
+# Logs & Diagnostics
+logs/
+*.log
+*.png
+PyWhatKit_DB.txt
+
+# Media Files
+vastu_content_queue/videos/*.mp4
+*.mp4
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# System
+Thumbs.db
+Desktop.ini
+.DS_Store
