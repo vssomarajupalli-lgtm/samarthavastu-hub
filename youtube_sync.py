@@ -593,10 +593,16 @@ def sync_youtube(force_poster: bool = True) -> dict:
     pure_pending.sort(key=pending_sort_key, reverse=True)
     pending_items = approved_items + pure_pending
 
-    # Assign sequential schedule slots (08:00 AM daily starting today)
+    # Assign sequential schedule slots (08:00 AM daily starting today or tomorrow)
     today = date.today()
+    today_str = today.strftime("%Y-%m-%d")
+    already_published_today = any(
+        (item.get("published_at") or "").startswith(today_str)
+        for item in archived_items
+    )
+    start_offset = 1 if already_published_today else 0
     for idx, item in enumerate(pending_items):
-        slot_date = (today + timedelta(days=idx)).strftime("%Y-%m-%d")
+        slot_date = (today + timedelta(days=idx + start_offset)).strftime("%Y-%m-%d")
         slot_time = "08:00:00"
         item["scheduled_date"] = slot_date
         item["scheduled_time"] = slot_time
@@ -680,7 +686,8 @@ def print_queue_status():
     print("-" * 90)
     for idx, item in enumerate(pending[:15]):
         thumb_icon = "🎨" if item.get("has_thumbnail") else "⚪"
-        print(f"{idx+1:<4} {item['id']:<16} {item.get('upload_date',''):<10} {item.get('scheduled_date',''):<12} {thumb_icon} pending  {(item.get('title') or '')[:34]}")
+        st = item.get("status", "pending")
+        print(f"{idx+1:<4} {item['id']:<16} {item.get('upload_date',''):<10} {item.get('scheduled_date',''):<12} {thumb_icon} {st:<10} {(item.get('title') or '')[:32]}")
 
     if len(pending) > 15:
         print(f"    ... and {len(pending)-15} more unposted items")
