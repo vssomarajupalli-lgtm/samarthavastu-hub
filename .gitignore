@@ -9,6 +9,7 @@ logs/
 *.log
 *.png
 !public/*.png
+!public/*.jpg
 PyWhatKit_DB.txt
 
 # Media Files
