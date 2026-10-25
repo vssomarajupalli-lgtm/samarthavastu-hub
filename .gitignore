@@ -8,6 +8,7 @@ token_result.json
 logs/
 *.log
 *.png
+!public/*.png
 PyWhatKit_DB.txt
 
 # Media Files

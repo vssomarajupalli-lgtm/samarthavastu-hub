@@ -1,0 +1,38 @@
+{
+  "name": "SAMARTHA ASTRO-VASTU (సమర్థ ఆస్ట్రో-వాస్తు)",
+  "short_name": "Samartha Astro-Vastu",
+  "description": "వాస్తు • జ్యోతిష్య • తాంత్రిక • ఆధ్యాత్మిక విజ్ఞాన పీఠం (@samarthavastu999)",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0c0202",
+  "theme_color": "#d4a017",
+  "lang": "te",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    },
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

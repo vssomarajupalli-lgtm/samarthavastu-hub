@@ -146,19 +146,19 @@ def build_card(video: dict, output_path: str):
     canvas.paste(Image.new("RGB", (CANVAS_SIZE, HEADER_H), (40, 5, 5)),
                  (0, 0), header_overlay)
 
-    # Channel name
-    font_channel = load_font(52, bold=True)
-    ch_text = "Samartha Vastu"
+    # Channel name (Dual-Title branding)
+    font_channel = load_font(42, bold=True)
+    ch_text = "SAMARTHA ASTRO-VASTU"
     bbox = draw.textbbox((0, 0), ch_text, font=font_channel)
     tw = bbox[2] - bbox[0]
-    draw.text(((CANVAS_SIZE - tw) // 2, 20), ch_text, font=font_channel, fill=ACCENT_LIGHT)
+    draw.text(((CANVAS_SIZE - tw) // 2, 18), ch_text, font=font_channel, fill=ACCENT_LIGHT)
 
-    # Telugu subtitle
-    font_sub = load_font(22)
-    sub_text = "వాస్తు శాస్త్రం  |  Vastu Shastra"
+    # Subtitle with Authority pillars & handle
+    font_sub = load_font(21)
+    sub_text = "వాస్తు • జ్యోతిష్య • తాంత్రిక • ఆధ్యాత్మిక విజ్ఞాన పీఠం (@samarthavastu999)"
     bbox2 = draw.textbbox((0, 0), sub_text, font=font_sub)
     tw2 = bbox2[2] - bbox2[0]
-    draw.text(((CANVAS_SIZE - tw2) // 2, 82), sub_text, font=font_sub, fill=(200, 160, 60))
+    draw.text(((CANVAS_SIZE - tw2) // 2, 78), sub_text, font=font_sub, fill=(240, 190, 80))
 
     draw_separator(draw, HEADER_H - 4, CANVAS_SIZE)
 
@@ -173,7 +173,7 @@ def build_card(video: dict, output_path: str):
 
     # Footer text
     font_footer = load_font(26, bold=True)
-    ft_text = "Watch Full Video on YouTube & Website"
+    ft_text = "Watch Full Video on YouTube & Official Website"
     bbox3 = draw.textbbox((0, 0), ft_text, font=font_footer)
     tw3 = bbox3[2] - bbox3[0]
     draw.text(((CANVAS_SIZE - tw3) // 2, FOOTER_Y + 18), ft_text,
@@ -181,11 +181,11 @@ def build_card(video: dict, output_path: str):
 
     # URL hint
     font_url = load_font(20)
-    url_text = "youtube.com/@samarthavastu999"
+    url_text = "https://samartha-astro-vastu.netlify.app | @samarthavastu999"
     bbox4 = draw.textbbox((0, 0), url_text, font=font_url)
     tw4 = bbox4[2] - bbox4[0]
     draw.text(((CANVAS_SIZE - tw4) // 2, FOOTER_Y + 52), url_text,
-              font=font_url, fill=(160, 120, 40))
+              font=font_url, fill=(212, 160, 23))
 
     # Gold bottom bar
     draw.rectangle([0, CANVAS_SIZE - 4, CANVAS_SIZE, CANVAS_SIZE], fill=ACCENT_COLOR)

@@ -123,10 +123,10 @@ def build_poster_html(item: dict) -> str:
 <html lang="te">
 <head>
 <meta charset="utf-8">
-<title>Samartha Vastu Poster</title>
+<title>SAMARTHA ASTRO-VASTU Poster</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Telugu:wght@400;600;700;800;900&family=Ramabhadra&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@700;800;900&family=Noto+Sans+Telugu:wght@400;600;700;800;900&family=Ramabhadra&display=swap" rel="stylesheet">
 <style>
 * {{
     box-sizing: border-box;
@@ -199,19 +199,30 @@ body {{
 }}
 
 .main-title {{
-    font-size: 60px;
+    font-family: 'Cinzel', serif;
+    font-size: 46px;
     font-weight: 900;
-    letter-spacing: 1.5px;
+    letter-spacing: 2px;
     background: linear-gradient(180deg, #fff7c2 0%, #ffd54f 40%, #d4a017 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     text-shadow: 0 4px 15px rgba(212, 160, 23, 0.3);
-    margin-bottom: 4px;
+    margin-bottom: 2px;
+    line-height: 1.15;
+}}
+
+.main-title-te {{
+    font-family: 'Ramabhadra', 'Noto Sans Telugu', sans-serif;
+    font-size: 28px;
+    font-weight: 800;
+    color: #ffe599;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
     line-height: 1.25;
 }}
 
 .sub-title {{
-    font-size: 23px;
+    font-size: 19px;
     font-weight: 700;
     color: #e6b840;
     letter-spacing: 0.5px;
@@ -396,8 +407,9 @@ body {{
     <!-- Header -->
     <div class="header-box">
       <div class="header-top-bar"></div>
-      <h1 class="main-title">సమర్థ వాస్తు</h1>
-      <div class="sub-title">వాస్తు &amp; జ్యోతిష్య శాస్త్రీయ పరిష్కారాలు</div>
+      <h1 class="main-title">SAMARTHA ASTRO-VASTU</h1>
+      <div class="main-title-te">(సమర్థ ఆస్ట్రో-వాస్తు)</div>
+      <div class="sub-title">వాస్తు • జ్యోతిష్య • తాంత్రిక • ఆధ్యాత్మిక విజ్ఞాన పీఠం &nbsp;|&nbsp; @samarthavastu999</div>
       <div class="divider-line">
         <span class="divider-diamond">◆</span>
       </div>
@@ -418,14 +430,15 @@ body {{
       <div class="footer-left">
         <div class="contact-label">వాస్తు &amp; జ్యోతిష్య సలహాల కోసం సంప్రదించండి:</div>
         <div class="contact-details"><span class="emoji">📞</span> +91 8919395559 &nbsp;|&nbsp; <span class="emoji">&#x2709;&#xFE0F;</span> samarthavastu999@gmail.com</div>
-        <div class="contact-wa"><span class="emoji">💬</span> WhatsApp: https://wa.me/918919395559</div>
-        <div class="brand-motto"><span class="emoji">✨</span> సమర్థ వాస్తు — శాస్త్రీయ పరిష్కారాలు, సంపద, ఆరోగ్యం</div>
+        <div class="contact-wa"><span class="emoji">💬</span> WhatsApp: https://wa.me/918919395559 &nbsp;|&nbsp; <span class="emoji">🌐</span> https://samartha-astro-vastu.netlify.app</div>
+        <div class="brand-motto"><span class="emoji">✨</span> SAMARTHA ASTRO-VASTU (సమర్థ ఆస్ట్రో-వాస్తు) — శాస్త్రీయ పరిష్కారాలు, సంపద, ఆరోగ్యం</div>
       </div>
       <div class="footer-right">
         <div class="qr-frame">
           <img src="{qr_b64}" class="qr-img" alt="Scan QR">
         </div>
-        <div class="qr-caption">వీడియో చూడండి / Scan</div>
+        <div class="qr-caption">వీడియో చూడండి / Scan QR</div>
+        <div class="qr-handle" style="font-size:12px;color:#ffd54f;font-weight:bold;margin-top:2px;">@samarthavastu999</div>
       </div>
     </div>
 
