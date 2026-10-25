@@ -1,21 +1,42 @@
 """
 auto_publisher.py
 -----------------
-Samartha Vastu - Automated Daily Publisher
+Samartha Vastu - 2-Stage Daily Auto Publisher & Queue Engine
 
-Reads master_schedule.json and publishes due items to:
-  - Facebook Page (Meta Graph API)
-  - Instagram Business Account (Meta Graph API, two-step)
-  - WhatsApp (pywhatkit.sendwhats_image)
+Workflow:
+  Stage A — Publishing Today's Approved Video (to Public):
+    1. Pre-flight internet check (waits up to 3 minutes for graph.facebook.com).
+    2. 1-Public-Post-Per-Day Lock (skips public publish if already published today).
+    3. Finds the item marked "preview_approved" in master_schedule.json.
+    4. Publishes to:
+       - Facebook Page (photo + clean Telugu caption)
+       - Facebook First Comment (YouTube video link with clickable preview card)
+       - Instagram Business Account (4:5 poster + Telugu caption <= 2000 chars)
+       - WhatsApp Public Group (DvPDx43oel4LQQgqCsn7Tr) & Personal WhatsApp (+918919395559)
+    5. Marks item as "status": "published".
+    6. Calls website_sync.py to update public/videos_data.json and index.html.
+    7. Runs auto_git_sync() to commit and push updates to GitHub.
 
-Updates each item status to "published" with post URLs after success
-so nothing is ever double-posted.
+  Stage B — Preparing & Sending Tomorrow's Preview (ONLY to Personal WhatsApp):
+    1. Runs youtube_sync.py to ingest any newly uploaded videos from @samarthavastu999.
+    2. Selects the newest unposted video (NEWEST -> OLDEST).
+    3. Renders 4:5 poster using Headless Chrome (html_poster_generator.py).
+    4. Marks item as "status": "preview_approved" for tomorrow.
+    5. Sends poster + caption ONLY to Personal WhatsApp (+918919395559) prefixed with:
+       "🔔 [TOMORROW'S PREVIEW — FOR YOUR CHECK ONLY]"
+       with a 3-line status receipt showing remaining unposted videos.
+
+  Skip Control:
+    python auto_publisher.py --skip-tomorrow
+    Marks current "preview_approved" video as "skipped", selects next newest,
+    renders poster, and sends updated preview to Personal WhatsApp.
 
 Usage:
-    python auto_publisher.py              # run all items due now (scheduled_at <= now)
-    python auto_publisher.py --publish-next  # force-publish the next pending item
-    python auto_publisher.py --dry-run    # simulate without any real API calls
-    python auto_publisher.py --item video_01  # publish a specific item by ID
+    python auto_publisher.py --daily-run         # Complete morning cycle (Stage A + Stage B)
+    python auto_publisher.py --prepare-tomorrow  # Prepare & send tomorrow's preview only
+    python auto_publisher.py --skip-tomorrow     # Skip tomorrow's preview & pick next
+    python auto_publisher.py --publish-next      # Force-publish next/approved item
+    python auto_publisher.py --dry-run           # Simulate without real posts
 """
 
 from __future__ import annotations
@@ -24,10 +45,11 @@ import argparse
 import json
 import logging
 import os
+import re
+import subprocess
 import sys
-import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -44,10 +66,11 @@ logging.basicConfig(
 log = logging.getLogger("auto_publisher")
 
 # --- Paths ---
-BASE_DIR       = Path(__file__).resolve().parent
-QUEUE_DIR      = BASE_DIR / "vastu_content_queue"
-THUMBNAILS_DIR = QUEUE_DIR / "thumbnails"
-SCHEDULE_FILE  = QUEUE_DIR / "master_schedule.json"
+BASE_DIR        = Path(__file__).resolve().parent
+QUEUE_DIR       = BASE_DIR / "vastu_content_queue"
+THUMBNAILS_DIR  = QUEUE_DIR / "thumbnails"
+SCHEDULE_FILE   = QUEUE_DIR / "master_schedule.json"
+SCREENSHOTS_DIR = BASE_DIR / "logs" / "screenshots"
 
 # --- Meta Graph API ---
 GRAPH_VERSION = "v21.0"
@@ -60,12 +83,13 @@ META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN",  "")
 YOUTUBE_URL       = os.getenv("YOUTUBE_URL",        "https://www.youtube.com/@samarthavastu999")
 CONTACT_PHONE     = os.getenv("CONTACT_PHONE",      "+91 8919395559")
 CONTACT_EMAIL     = os.getenv("CONTACT_EMAIL",      "samarthavastu999@gmail.com")
-WHATSAPP_TARGET   = os.getenv("WHATSAPP_TARGET",    "")   # comma-separated: group IDs and/or phone numbers
-WHATSAPP_ADMIN    = os.getenv("WHATSAPP_ADMIN",     "")   # personal admin number (optional)
+WHATSAPP_TARGET   = os.getenv("WHATSAPP_TARGET",    "DvPDx43oel4LQQgqCsn7Tr,+918919395559")
+WHATSAPP_ADMIN    = os.getenv("WHATSAPP_ADMIN",     "+918919395559")
+WHATSAPP_GROUP    = "DvPDx43oel4LQQgqCsn7Tr"
 
 # --- Instagram polling ---
 IG_POLL_INTERVAL = 4   # seconds
-IG_POLL_MAX      = 20  # max polls before giving up
+IG_POLL_MAX      = 20  # max polls
 
 
 def section(title: str):
@@ -74,53 +98,67 @@ def section(title: str):
 
 
 # ---------------------------------------------------------------------------- #
-#  Schedule helpers                                                              #
+#  Pre-flight Checks & Schedule Persistence                                    #
 # ---------------------------------------------------------------------------- #
+
+def wait_for_internet(timeout_seconds: int = 180) -> bool:
+    """Wait up to timeout_seconds for internet connectivity (graph.facebook.com)."""
+    log.info("[Pre-flight] Checking internet connectivity (up to %ds)...", timeout_seconds)
+    start_time = time.time()
+    while time.time() - start_time < timeout_seconds:
+        try:
+            resp = requests.get("https://graph.facebook.com", timeout=5)
+            if resp.status_code in (200, 400, 404):
+                elapsed = time.time() - start_time
+                log.info("[Pre-flight] Internet connectivity verified OK in %.1fs.", elapsed)
+                return True
+        except Exception:
+            pass
+        time.sleep(4)
+    log.error("[Pre-flight] Internet connection check timed out after %ds.", timeout_seconds)
+    return False
+
 
 def load_schedule() -> list:
     if not SCHEDULE_FILE.exists():
-        log.error("master_schedule.json not found. Run queue_builder.py first.")
+        log.error("master_schedule.json not found. Run youtube_sync.py first.")
         sys.exit(1)
-    # utf-8-sig silently strips BOM that PowerShell adds when writing UTF-8
     with open(SCHEDULE_FILE, encoding="utf-8-sig") as f:
         data = json.load(f)
     return data if isinstance(data, list) else data.get("items", [])
 
 
 def save_schedule(items: list):
+    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
 
 
-def get_due_items(schedule: list) -> list:
-    """Return items whose scheduled_at <= now and status == pending."""
-    now = datetime.now()
-    due = []
+def check_daily_published_lock(schedule: list, force: bool = False) -> bool:
+    """
+    Checks if a post was already published to public today (YYYY-MM-DD).
+    Returns True if safe to publish to public, False if already published today.
+    """
+    if force:
+        log.info("[Daily Lock] --force flag supplied: 1-post-per-day lock bypassed.")
+        return True
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
     for item in schedule:
-        if item.get("status") != "pending":
-            continue
-        scheduled_at_str = item.get("scheduled_at", "")
-        if not scheduled_at_str:
-            continue
-        try:
-            scheduled_at = datetime.fromisoformat(scheduled_at_str)
-            if scheduled_at <= now:
-                due.append(item)
-        except ValueError:
-            pass
-    return due
-
-
-def get_next_pending(schedule: list):
-    """Return the earliest pending item regardless of schedule time."""
-    pending = [i for i in schedule if i.get("status") == "pending"]
-    if not pending:
-        return None
-    return min(pending, key=lambda x: x.get("scheduled_at", "9999"))
+        if item.get("status") == "published":
+            pub_at = item.get("published_at") or ""
+            if pub_at.startswith(today_str):
+                log.info("[Daily Lock Active] A post was ALREADY published to public today (%s):", today_str)
+                log.info("  Item ID : %s", item.get("id"))
+                log.info("  Title   : %s", (item.get("title") or "")[:50])
+                log.info("  Time    : %s", pub_at)
+                log.info("Skipping public re-publication to maintain strict 1-post-per-day rule.")
+                return False
+    return True
 
 
 # ---------------------------------------------------------------------------- #
-#  Meta Graph API helpers                                                        #
+#  Meta Graph API Helpers                                                        #
 # ---------------------------------------------------------------------------- #
 
 def _api_post(endpoint: str, payload: dict, timeout: int = 30) -> dict:
@@ -141,81 +179,140 @@ def _api_get(endpoint: str, params: dict, timeout: int = 15) -> dict:
         return {"raw": resp.text}
 
 
+def post_facebook_comment(photo_id: str, comment_text: str, dry_run: bool = False) -> dict:
+    """Posts a First Comment under the Facebook photo with clickable YouTube link."""
+    log.info("[Facebook] Adding First Comment to photo %s...", photo_id)
+    if dry_run:
+        log.info("[Facebook] DRY-RUN - would comment: %s", comment_text)
+        return {"success": True, "comment_id": "dry_run_comment"}
+
+    url = f"{GRAPH_BASE}/{photo_id}/comments"
+    resp = requests.post(url, data={"message": comment_text, "access_token": META_ACCESS_TOKEN}, timeout=20)
+    try:
+        data = resp.json()
+        if "id" in data:
+            log.info("[Facebook] First Comment posted OK (ID: %s)", data["id"])
+            return {"success": True, "comment_id": data["id"]}
+        else:
+            log.warning("[Facebook] First Comment note: %s", data)
+            return {"success": False, "error": str(data)}
+    except Exception as exc:
+        log.error("[Facebook] First Comment error: %s", exc)
+        return {"success": False, "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------- #
-#  Caption builder                                                               #
+#  Caption Builders                                                              #
 # ---------------------------------------------------------------------------- #
 
-def build_caption(item: dict, fb_url: str = "", ig_url: str = "") -> str:
+def clean_description(raw: str) -> str:
+    clean = re.sub(r"#\S+", "", raw)
+    clean = re.sub(r"\n{3,}", "\n\n", clean)
+    return clean.strip()
+
+
+def build_public_caption(item: dict) -> str:
     """
-    Builds a rich Telugu caption including the title, caption body, and links.
+    Clean Telugu caption for Facebook & Instagram (zero hashtags).
+    Enforces safe length <= 2,000 characters for Instagram compliance.
     """
-    title   = item.get("title",   "")
-    caption = item.get("caption", "")
+    title    = (item.get("title") or "").strip()
+    raw_desc = item.get("description") or item.get("caption") or ""
+    video_id = item.get("video_id", "")
+    is_short = item.get("is_short", False)
+
+    clean_desc = clean_description(raw_desc)
+    yt_url = f"https://www.youtube.com/shorts/{video_id}" if is_short else f"https://www.youtube.com/watch?v={video_id}"
+
+    footer_lines = [
+        f"📺 పూర్తి వీడియో చూడండి: {yt_url}",
+        f"💬 WhatsApp Consultation: https://wa.me/918919395559",
+        f"📞 Contact: {CONTACT_PHONE}",
+        f"✉️ Email: {CONTACT_EMAIL}",
+    ]
+    footer = "\n".join(footer_lines)
+
+    max_desc_len = max(100, 2000 - len(title) - len(footer) - 20)
+    if len(clean_desc) > max_desc_len:
+        clean_desc = clean_desc[:max_desc_len].rsplit(" ", 1)[0] + "..."
 
     parts = []
     if title:
-        parts.append(f"{title}")
+        parts.append(title)
         parts.append("")
-    if caption:
-        parts.append(caption)
+    if clean_desc:
+        parts.append(clean_desc)
         parts.append("")
-
-    parts.append(f"📺 YouTube: {YOUTUBE_URL}")
-    parts.append(f"📞 WhatsApp: {CONTACT_PHONE}")
-    parts.append(f"✉️ Email: {CONTACT_EMAIL}")
-
-    # Add live post links if available (for WhatsApp message)
-    if fb_url or ig_url:
-        parts.append("")
-        if fb_url:
-            parts.append(f"🌐 Facebook: {fb_url}")
-        if ig_url:
-            parts.append(f"📸 Instagram: {ig_url}")
+    parts.append(footer)
 
     return "\n".join(parts)
 
 
-def build_whatsapp_caption(item: dict, fb_url: str = "", ig_url: str = "") -> str:
-    """Build a formatted WhatsApp message with title, caption, and live links."""
-    title   = item.get("title",   "")
-    caption = item.get("caption", "")
+def build_whatsapp_caption(
+    item: dict,
+    is_preview: bool = False,
+    is_admin: bool = False,
+    remaining_unposted: int = 0,
+) -> str:
+    """
+    Builds WhatsApp formatted caption under 1000 characters to prevent modal overflow.
+    If is_preview: prefixes with [TOMORROW'S PREVIEW — FOR YOUR CHECK ONLY].
+    If is_admin: appends 3-line status receipt.
+    """
+    title    = (item.get("title") or "").strip()
+    raw_desc = item.get("description") or item.get("caption") or ""
+    video_id = item.get("video_id", "")
+    is_short = item.get("is_short", False)
 
-    lines = []
+    clean_desc = clean_description(raw_desc)
+    yt_url = f"https://www.youtube.com/shorts/{video_id}" if is_short else f"https://www.youtube.com/watch?v={video_id}"
+
+    header_prefix = "🔔 [TOMORROW'S PREVIEW — FOR YOUR CHECK ONLY]\n\n" if is_preview else ""
+
+    footer_lines = [
+        f"📺 YouTube: {yt_url}",
+        f"💬 WhatsApp: https://wa.me/918919395559",
+        f"📞 Phone: {CONTACT_PHONE}",
+        f"✉️ Email: {CONTACT_EMAIL}",
+    ]
+
+    if is_preview:
+        footer_lines.append("")
+        footer_lines.append("---")
+        footer_lines.append("📊 *Status:* Locked for Tomorrow's Morning Post")
+        footer_lines.append(f"⏳ *Remaining Queue:* {remaining_unposted} unposted videos")
+        footer_lines.append("(To skip or change: python auto_publisher.py --skip-tomorrow)")
+    elif is_admin:
+        footer_lines.append("")
+        footer_lines.append("---")
+        footer_lines.append("📊 *Daily Publishing Status:*")
+        footer_lines.append(f"✅ *Published Today:* {title[:45]}")
+        footer_lines.append(f"⏳ *Remaining Queue:* {remaining_unposted} unposted videos")
+
+    footer = "\n".join(footer_lines)
+
+    max_desc_len = max(80, 940 - len(header_prefix) - len(title) - len(footer) - 20)
+    if len(clean_desc) > max_desc_len:
+        clean_desc = clean_desc[:max_desc_len].rsplit(" ", 1)[0] + "..."
+
+    parts = []
+    if header_prefix:
+        parts.append(header_prefix.strip())
     if title:
-        lines.append(f"*{title}*")
-        lines.append("")
-    if caption:
-        lines.append(caption)
-        lines.append("")
-    lines.append(f"📺 YouTube: {YOUTUBE_URL}")
-    lines.append(f"📞 WhatsApp: {CONTACT_PHONE}")
-    lines.append(f"✉️ Email: {CONTACT_EMAIL}")
-    if fb_url or ig_url:
-        lines.append("")
-        if fb_url:
-            lines.append(f"🌐 Facebook: {fb_url}")
-        if ig_url:
-            lines.append(f"📸 Instagram: {ig_url}")
-    return "\n".join(lines)
+        parts.append(f"*{title}*")
+        parts.append("")
+    if clean_desc:
+        parts.append(clean_desc)
+        parts.append("")
+    parts.append(footer)
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------- #
-#  Facebook publisher                                                            #
+#  Facebook Publisher                                                            #
 # ---------------------------------------------------------------------------- #
 
 def publish_facebook(item: dict, local_thumb: str, caption: str, dry_run: bool) -> dict:
-    """
-    Upload local thumbnail directly to Facebook Page via multipart form-data,
-    then fetch the Facebook CDN URL of the uploaded image so Instagram can use it.
-
-    Returns:
-        {
-            "success":       bool,
-            "post_id":       str,   # e.g. "271667576040971_123456789"
-            "post_url":      str,   # https://www.facebook.com/PAGE/posts/PHOTO
-            "cdn_image_url": str,   # highest-res CDN URL — pass to Instagram
-        }
-    """
     section("FACEBOOK PAGE POST")
 
     endpoint = f"{FB_PAGE_ID}/photos"
@@ -226,7 +323,6 @@ def publish_facebook(item: dict, local_thumb: str, caption: str, dry_run: bool) 
     if dry_run:
         log.info("[Facebook] DRY-RUN - skipping real request")
         mock_id = f"271667576040971_dry-run-{item['id']}"
-        # Return a realistic placeholder CDN URL so the IG dry-run also works
         cdn_url = "https://scontent.cdninstagram.com/dry-run-image.jpg"
         return {
             "success":       True,
@@ -238,10 +334,8 @@ def publish_facebook(item: dict, local_thumb: str, caption: str, dry_run: bool) 
     if not Path(local_thumb).exists():
         err = f"Thumbnail not found: {local_thumb}"
         log.error("[Facebook] %s", err)
-        return {"success": False, "post_id": None, "post_url": None,
-                "cdn_image_url": None, "error": err}
+        return {"success": False, "post_id": None, "post_url": None, "cdn_image_url": None, "error": err}
 
-    # ── Step 1: Upload file via multipart ─────────────────────────────────
     url = f"{GRAPH_BASE}/{endpoint}"
     try:
         with open(local_thumb, "rb") as img_file:
@@ -254,33 +348,29 @@ def publish_facebook(item: dict, local_thumb: str, caption: str, dry_run: bool) 
         data = resp.json()
     except Exception as exc:
         log.error("[Facebook] Upload error: %s", exc)
-        return {"success": False, "post_id": None, "post_url": None,
-                "cdn_image_url": None, "error": str(exc)}
+        return {"success": False, "post_id": None, "post_url": None, "cdn_image_url": None, "error": str(exc)}
 
     if "id" not in data:
         log.error("[Facebook] Upload failed: %s", data)
-        return {"success": False, "post_id": None, "post_url": None,
-                "cdn_image_url": None, "error": str(data)}
+        return {"success": False, "post_id": None, "post_url": None, "cdn_image_url": None, "error": str(data)}
 
     photo_id = data["id"]
     post_url = f"https://www.facebook.com/{photo_id.replace('_', '/posts/')}"
     log.info("[Facebook] Uploaded photo id: %s", photo_id)
 
-    # ── Step 2: Fetch CDN URL from the uploaded photo ────────────────────
     cdn_image_url = None
-    meta = _api_get(
-        photo_id,
-        {"fields": "images,link", "access_token": META_ACCESS_TOKEN},
-    )
+    meta = _api_get(photo_id, {"fields": "images,link", "access_token": META_ACCESS_TOKEN})
     images = meta.get("images", [])
     if images:
-        # images are sorted largest first
         cdn_image_url = images[0].get("source")
         log.info("[Facebook] CDN image URL: %s", cdn_image_url)
-    else:
-        log.warning("[Facebook] Could not fetch CDN image URL for photo %s — Instagram step may fail", photo_id)
 
-    log.info("[Facebook] Post URL: %s", post_url)
+    video_id = item.get("video_id", "")
+    is_short = item.get("is_short", False)
+    yt_url = f"https://www.youtube.com/shorts/{video_id}" if is_short else f"https://www.youtube.com/watch?v={video_id}"
+    comment_text = f"🎥 పూర్తి వీడియో ఇక్కడ చూడండి:\n{yt_url}"
+    post_facebook_comment(photo_id, comment_text, dry_run=dry_run)
+
     return {
         "success":       True,
         "post_id":       photo_id,
@@ -290,367 +380,427 @@ def publish_facebook(item: dict, local_thumb: str, caption: str, dry_run: bool) 
 
 
 # ---------------------------------------------------------------------------- #
-#  Instagram publisher                                                           #
+#  Instagram Publisher                                                           #
 # ---------------------------------------------------------------------------- #
 
 def _poll_ig_container(container_id: str) -> bool:
     for i in range(IG_POLL_MAX):
         data   = _api_get(container_id, {"fields": "status_code,status", "access_token": META_ACCESS_TOKEN})
         status = data.get("status_code", "")
-        log.debug("[Instagram] Container %s status: %s (poll %d)", container_id, status, i + 1)
         if status == "FINISHED":
             return True
         if status in ("ERROR", "EXPIRED"):
             log.error("[Instagram] Container failed: %s", data)
             return False
         time.sleep(IG_POLL_INTERVAL)
-    log.error("[Instagram] Container %s never reached FINISHED", container_id)
     return False
 
 
 def publish_instagram(item: dict, image_url: str, caption: str, dry_run: bool) -> dict:
-    """
-    Two-step Instagram publish: create container -> poll -> publish.
-
-    Args:
-        image_url: Publicly accessible HTTPS URL of the image.
-                   Pass the Facebook CDN URL returned by publish_facebook()
-                   so no external hosting is required.
-
-    Returns:
-        {
-            "success":  bool,
-            "media_id": str,   # Instagram media ID
-            "post_url": str,   # exact post permalink (or profile fallback)
-        }
-    """
     section("INSTAGRAM BUSINESS POST")
-
     ig_profile_url = "https://www.instagram.com/samarthavastu999/"
-
-    log.info("[Instagram] Step 1 - Create container")
-    log.info("[Instagram] Image URL: %s", image_url)
-    log.info("[Instagram] Caption preview: %s...", caption[:80])
 
     if dry_run:
         log.info("[Instagram] DRY-RUN - skipping container creation")
-        return {
-            "success":  True,
-            "media_id": f"dry-run-ig-{item['id']}",
-            "post_url": ig_profile_url,
-        }
+        return {"success": True, "media_id": f"dry-run-ig-{item['id']}", "post_url": ig_profile_url}
 
     if not image_url:
-        err = "No CDN image URL available for Instagram (Facebook upload may have failed)"
-        log.error("[Instagram] %s", err)
-        return {"success": False, "media_id": None, "post_url": None, "error": err}
+        return {"success": False, "media_id": None, "post_url": None, "error": "No CDN image URL available"}
 
-    # ── Step 1: Create media container ───────────────────────────────────
-    ep1      = f"{IG_USER_ID}/media"
-    payload1 = {
-        "image_url":    image_url,
-        "caption":      caption,
-        "access_token": META_ACCESS_TOKEN,
-    }
-
-    data1 = _api_post(ep1, payload1)
+    ep1 = f"{IG_USER_ID}/media"
+    data1 = _api_post(ep1, {"image_url": image_url, "caption": caption, "access_token": META_ACCESS_TOKEN})
     if "id" not in data1:
         log.error("[Instagram] Container creation failed: %s", data1)
         return {"success": False, "media_id": None, "post_url": None, "error": str(data1)}
 
     container_id = data1["id"]
-    log.info("[Instagram] Container created: %s", container_id)
+    log.info("[Instagram] Container created: %s, polling status...", container_id)
 
-    # ── Poll until FINISHED ───────────────────────────────────────────────
     if not _poll_ig_container(container_id):
-        return {"success": False, "media_id": None, "post_url": None,
-                "error": f"Container {container_id} did not reach FINISHED"}
+        return {"success": False, "media_id": None, "post_url": None, "error": "Container did not reach FINISHED"}
 
-    # ── Step 2: Publish container ─────────────────────────────────────────
-    ep2      = f"{IG_USER_ID}/media_publish"
-    payload2 = {"creation_id": container_id, "access_token": META_ACCESS_TOKEN}
-
-    log.info("[Instagram] Step 2 - Publish container %s", container_id)
-    data2 = _api_post(ep2, payload2)
-
+    ep2 = f"{IG_USER_ID}/media_publish"
+    data2 = _api_post(ep2, {"creation_id": container_id, "access_token": META_ACCESS_TOKEN})
     if "id" not in data2:
-        log.error("[Instagram] Publish failed: %s", data2)
         return {"success": False, "media_id": None, "post_url": None, "error": str(data2)}
 
     media_id = data2["id"]
-    log.info("[Instagram] Published media_id: %s", media_id)
+    log.info("[Instagram] Published media ID: %s", media_id)
 
-    # ── Step 3: Fetch exact post permalink ────────────────────────────────
-    permalink = ig_profile_url   # safe fallback
-    pdata = _api_get(
-        media_id,
-        {"fields": "permalink", "access_token": META_ACCESS_TOKEN},
-    )
+    permalink = ig_profile_url
+    pdata = _api_get(media_id, {"fields": "permalink", "access_token": META_ACCESS_TOKEN})
     if pdata.get("permalink"):
         permalink = pdata["permalink"]
-        log.info("[Instagram] Permalink: %s", permalink)
-    else:
-        log.warning("[Instagram] Could not fetch permalink for media %s — using profile URL", media_id)
 
     return {"success": True, "media_id": media_id, "post_url": permalink}
 
 
 # ---------------------------------------------------------------------------- #
-#  WhatsApp dispatcher                                                           #
+#  WhatsApp Dispatcher                                                           #
 # ---------------------------------------------------------------------------- #
 
-def dispatch_whatsapp(item: dict, thumb_path: str, wa_caption: str, dry_run: bool) -> bool:
-    """
-    Send thumbnail image + Telugu caption to every target in WHATSAPP_TARGET.
-
-    WHATSAPP_TARGET is a comma-separated string; each entry is either:
-      - A WhatsApp Group Invite ID  (e.g. DvPDx43oel4LQQgqCsn7Tr)
-      - A phone number with code    (e.g. +918919395559)
-
-    A 5-second pause is inserted between consecutive targets so WhatsApp Web
-    has time to close the previous tab before opening the next one.
-
-    Returns True if ALL targets were dispatched successfully.
-    """
-    section("WHATSAPP DISPATCH")
-
-    # ── Parse targets ──────────────────────────────────────────────────────
-    raw_targets = WHATSAPP_TARGET or ""
-    targets = [t.strip() for t in raw_targets.split(",") if t.strip()]
-
-    # Filter out any leftover placeholder values
-    targets = [t for t in targets if not t.startswith("+91XXXX")]
-
-    if not targets:
-        log.warning("[WhatsApp] WHATSAPP_TARGET not configured or still placeholder — skipping.")
-        log.warning("[WhatsApp] Set WHATSAPP_TARGET=<GroupInviteID>,<+PhoneNumber> in .env")
-        return False
-
-    if not Path(thumb_path).exists():
-        log.warning("[WhatsApp] Thumbnail not found at %s — skipping WhatsApp.", thumb_path)
-        return False
-
-    log.info("[WhatsApp] Targets (%d): %s", len(targets), targets)
-    log.info("[WhatsApp] Image   : %s", thumb_path)
-    log.info("[WhatsApp] Caption : %s...", wa_caption[:80])
-
+def dispatch_whatsapp_media(
+    target: str,
+    thumb_path: str,
+    caption: str,
+    tag: str,
+    dry_run: bool = False,
+) -> bool:
     if dry_run:
-        for t in targets:
-            log.info("[WhatsApp] DRY-RUN — would send to: %s", t)
+        log.info("[WhatsApp] DRY-RUN — would send to: %s", target)
         return True
 
     from whatsapp_sender import send_whatsapp_media
 
-    all_ok = True
-    for idx, target in enumerate(targets):
-        log.info("[WhatsApp] [%d/%d] Sending to: %s", idx + 1, len(targets), target)
-        tag = f"target_{idx+1}"
-        try:
-            res = send_whatsapp_media(
-                target=target,
-                img_path=thumb_path,
-                caption=wa_caption,
-                output_dir=str(BASE_DIR),
-                target_tag=tag,
-                wait_load=25,
-                close_tab=False,
-            )
-            if res.get("success"):
-                log.info("[WhatsApp] [%d/%d] Dispatched OK → %s", idx + 1, len(targets), target)
+    try:
+        res = send_whatsapp_media(
+            target=target,
+            img_path=thumb_path,
+            caption=caption,
+            output_dir=str(SCREENSHOTS_DIR),
+            target_tag=tag,
+            wait_load=25,
+            close_tab=False,
+        )
+        return bool(res.get("success"))
+    except Exception as exc:
+        log.error("[WhatsApp] Dispatch failed for %s: %s", target, exc)
+        return False
+
+
+# ---------------------------------------------------------------------------- #
+#  Poster Resolver                                                               #
+# ---------------------------------------------------------------------------- #
+
+def ensure_poster_exists(item: dict) -> str:
+    """Ensures 4:5 Headless Chrome poster exists at vastu_content_queue/thumbnails/yt_<ID>.jpg."""
+    THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
+    poster_path = THUMBNAILS_DIR / f"{item['id']}.jpg"
+
+    if not poster_path.exists() or poster_path.stat().st_size == 0:
+        log.info("Generating Headless Chrome poster for: %s", item["id"])
+        from html_poster_generator import render_html_to_poster
+        render_html_to_poster(item, poster_path)
+
+    item["has_thumbnail"] = True
+    item["thumbnail_file"] = f"vastu_content_queue\\thumbnails\\{item['id']}.jpg"
+
+    return str(poster_path)
+
+
+# ---------------------------------------------------------------------------- #
+#  Git Auto-Sync                                                                 #
+# ---------------------------------------------------------------------------- #
+
+def auto_git_sync(title: str = ""):
+    """
+    Automatically commits and pushes published updates to GitHub.
+    Runs after Stage A public publishing and website_sync.
+    """
+    log.info("[Git Auto-Sync] Checking git status...")
+    try:
+        subprocess.run(["git", "add", "vastu_content_queue/master_schedule.json", 
+                        "public/videos_data.json", "public/videos.json", "public/index.html"], 
+                       cwd=str(BASE_DIR), capture_output=True, text=True)
+        diff_check = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(BASE_DIR))
+        if diff_check.returncode != 0:
+            commit_msg = f"chore(auto): daily update for {title[:40]} [{datetime.now().strftime('%Y-%m-%d')}]"
+            subprocess.run(["git", "commit", "-m", commit_msg], cwd=str(BASE_DIR), capture_output=True, text=True)
+            log.info("[Git Auto-Sync] Committed daily update: %s", commit_msg)
+            
+            remotes = subprocess.run(["git", "remote"], cwd=str(BASE_DIR), capture_output=True, text=True).stdout
+            if "origin" in remotes.split():
+                log.info("[Git Auto-Sync] Pushing to GitHub origin/main...")
+                push_res = subprocess.run(["git", "push", "origin", "main"], cwd=str(BASE_DIR), capture_output=True, text=True)
+                if push_res.returncode == 0:
+                    log.info("[Git Auto-Sync] Pushed successfully to GitHub!")
+                else:
+                    log.warning("[Git Auto-Sync] Push note: %s", push_res.stderr)
             else:
-                all_ok = False
-        except Exception as exc:
-            log.error("[WhatsApp] [%d/%d] Failed → %s : %s", idx + 1, len(targets), target, exc)
-            all_ok = False
-
-        # Pause between targets so WhatsApp Web can settle
-        if idx < len(targets) - 1:
-            log.info("[WhatsApp] Waiting 5s before next target...")
-            time.sleep(5)
-
-    return all_ok
+                log.info("[Git Auto-Sync] Local commit saved. (No remote 'origin' configured yet).")
+        else:
+            log.info("[Git Auto-Sync] No changes to commit.")
+    except Exception as exc:
+        log.warning("[Git Auto-Sync] Note: %s", exc)
 
 
 # ---------------------------------------------------------------------------- #
-#  Main publish routine                                                          #
+#  Stage A: Public Daily Publish                                                 #
 # ---------------------------------------------------------------------------- #
 
-def resolve_local_thumb(item: dict) -> str:
+def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: bool = False) -> bool:
     """
-    Returns the absolute local path to the item's thumbnail.
-    Checks the canonical thumbnails/ location first, then falls back
-    to the thumbnail_file path recorded in master_schedule.json.
+    Executes Stage A:
+    Publishes today's pre-approved video (or fallback next pending) to Facebook,
+    Instagram, WhatsApp Public Group, and Personal WhatsApp.
     """
-    local_path = THUMBNAILS_DIR / f"{item['id']}.jpg"
-    if not local_path.exists():
-        tf = item.get("thumbnail_file")
-        if tf:
-            local_path = BASE_DIR / tf
-    return str(local_path)
+    section("STAGE A: PUBLISHING TODAY'S VIDEO TO PUBLIC")
 
+    # Daily Lock Check
+    if not dry_run and not check_daily_published_lock(schedule, force=force):
+        return True
 
-def publish_item(item: dict, schedule: list, dry_run: bool, skip_whatsapp: bool = False, whatsapp_only: bool = False) -> bool:
-    """
-    Full publish pipeline for a single item:
-      1. Facebook
-      2. Instagram
-      3. WhatsApp
-    Updates schedule in place. Returns True if at least one platform succeeded.
-    """
-    item_id     = item["id"]
-    local_thumb = resolve_local_thumb(item)
+    # Find the target item: look for "preview_approved" first, then earliest pending
+    target_item = None
+    for item in schedule:
+        if item.get("status") == "preview_approved":
+            target_item = item
+            break
 
-    log.info("=" * 62)
-    log.info("Publishing item: %s", item_id)
-    log.info("Title          : %s", item.get("title", ""))
-    log.info("Thumbnail      : %s", local_thumb)
-    log.info("=" * 62)
-
-    if whatsapp_only:
-        log.info("[WhatsApp Only] Skipping Facebook and Instagram publishing.")
-        fb_result   = {"success": False, "skipped": True}
-        ig_result   = {"success": False, "skipped": True}
-        fb_post_url = item.get("fb_post_url", "")
-        ig_post_url = item.get("ig_post_url", "")
-
-        wa_caption = build_whatsapp_caption(item, fb_url=fb_post_url, ig_url=ig_post_url)
-        wa_sent    = dispatch_whatsapp(item, local_thumb, wa_caption, dry_run)
-
-        section(f"PUBLISH SUMMARY (WhatsApp Only) for {item_id}")
-        print(f"  WhatsApp : {'[OK]' if wa_sent else '[FAIL]'}")
-        return wa_sent
-
-    # ── 1. Facebook: multipart upload → returns CDN URL ──────────────────
-    fb_caption = build_caption(item)
-    fb_result  = publish_facebook(item, local_thumb, fb_caption, dry_run)
-
-    fb_post_id    = fb_result.get("post_id")
-    fb_post_url   = fb_result.get("post_url", "")
-    cdn_image_url = fb_result.get("cdn_image_url")   # Facebook-hosted CDN URL
-
-    # ── 2. Instagram: use the Facebook CDN URL (no external hosting needed) ─
-    ig_caption = build_caption(item)
-    ig_result  = publish_instagram(item, cdn_image_url or "", ig_caption, dry_run)
-
-    ig_media_id = ig_result.get("media_id")
-    ig_post_url = ig_result.get("post_url", "")
-
-    # ── 3. WhatsApp: local thumbnail + formatted caption with live links ──
-    if not skip_whatsapp:
-        wa_caption = build_whatsapp_caption(item, fb_url=fb_post_url, ig_url=ig_post_url)
-        wa_sent    = dispatch_whatsapp(item, local_thumb, wa_caption, dry_run)
-    else:
-        log.info("[WhatsApp] Skipped (--skip-whatsapp active, keeping previous dispatch status).")
-        wa_sent    = True
-
-    # --- Update schedule entry ---
-    any_success = fb_result.get("success") or ig_result.get("success")
-
-    if any_success:
-        for sched_item in schedule:
-            if sched_item["id"] == item_id:
-                sched_item["status"]       = "published" if not dry_run else "dry-run"
-                sched_item["published_at"] = datetime.now().isoformat()
-                sched_item["fb_post_id"]   = fb_post_id
-                sched_item["fb_post_url"]  = fb_post_url
-                sched_item["ig_media_id"]  = ig_media_id
-                sched_item["ig_post_url"]  = ig_post_url
-                sched_item["wa_sent"]      = wa_sent
+    if not target_item:
+        for item in schedule:
+            if item.get("status") not in ("published", "skipped"):
+                target_item = item
                 break
 
-    # --- Summary ---
-    section(f"PUBLISH SUMMARY for {item_id}")
-    fb_icon = "[OK]" if fb_result.get("success") else "[FAIL]"
-    ig_icon = "[OK]" if ig_result.get("success") else "[FAIL]"
-    wa_icon = "[OK]" if wa_sent else "[SKIP/FAIL]"
+    if not target_item:
+        log.warning("[Stage A] No approved or pending items found in queue.")
+        return False
 
-    print(f"  Facebook  : {fb_icon}  {fb_post_url or fb_result.get('error','')}")
-    print(f"  Instagram : {ig_icon}  {ig_post_url or ig_result.get('error','')}")
-    print(f"  WhatsApp  : {wa_icon}")
-    if dry_run:
-        print("\n  [DRY-RUN] No real posts were made. Schedule NOT permanently updated.")
-    elif any_success:
-        print(f"\n  Item '{item_id}' marked as published in master_schedule.json")
+    item_id = target_item["id"]
+    poster_path = ensure_poster_exists(target_item)
+    caption = build_public_caption(target_item)
+    remaining_unposted = sum(1 for i in schedule if i.get("status") not in ("published", "skipped") and i.get("id") != item_id)
+
+    log.info("Target Item: %s (%s)", item_id, target_item.get("title", "")[:45])
+    log.info("Poster Path: %s", poster_path)
+    log.info("Unposted Remaining: %d", remaining_unposted)
+
+    # 1. Facebook Page
+    fb_res = publish_facebook(target_item, poster_path, caption, dry_run)
+    fb_post_id  = fb_res.get("post_id")
+    fb_post_url = fb_res.get("post_url", "")
+    cdn_img_url = fb_res.get("cdn_image_url")
+
+    # 2. Instagram
+    ig_res = publish_instagram(target_item, cdn_img_url or "", caption, dry_run)
+    ig_media_id = ig_res.get("media_id")
+    ig_post_url = ig_res.get("post_url", "")
+
+    # 3. WhatsApp Public Group & Personal WhatsApp
+    group_caption = build_whatsapp_caption(target_item, is_preview=False, is_admin=False)
+    admin_caption = build_whatsapp_caption(target_item, is_preview=False, is_admin=True, remaining_unposted=remaining_unposted)
+
+    log.info("[WhatsApp] [1/2] Sending to Public Group: %s", WHATSAPP_GROUP)
+    g_ok = dispatch_whatsapp_media(WHATSAPP_GROUP, poster_path, group_caption, tag="group_public", dry_run=dry_run)
+    time.sleep(5)
+
+    log.info("[WhatsApp] [2/2] Sending to Personal WhatsApp: %s", WHATSAPP_ADMIN)
+    a_ok = dispatch_whatsapp_media(WHATSAPP_ADMIN, poster_path, admin_caption, tag="admin_personal", dry_run=dry_run)
+
+    any_success = fb_res.get("success") or ig_res.get("success") or g_ok or a_ok
+    if any_success and not dry_run:
+        target_item["status"]       = "published"
+        target_item["published_at"] = datetime.now().isoformat()
+        target_item["fb_post_id"]   = fb_post_id
+        target_item["fb_post_url"]  = fb_post_url
+        target_item["ig_media_id"]  = ig_media_id
+        target_item["ig_post_url"]  = ig_post_url
+        target_item["wa_sent"]      = g_ok and a_ok
+        save_schedule(schedule)
+
+        # Update Website Data & Auto Git Sync
+        try:
+            from website_sync import sync_website_data
+            log.info("[Website Sync] Updating public/videos_data.json and index.html...")
+            sync_website_data()
+            auto_git_sync(title=target_item.get("title", ""))
+        except Exception as exc:
+            log.warning("[Post-Publish Sync] Note: %s", exc)
+
+    section(f"STAGE A SUMMARY for {item_id}")
+    print(f"  Facebook  : {'[OK]' if fb_res.get('success') else '[FAIL]'}  {fb_post_url}")
+    print(f"  Instagram : {'[OK]' if ig_res.get('success') else '[FAIL]'}  {ig_post_url}")
+    print(f"  WhatsApp Group  : {'[OK]' if g_ok else '[FAIL]'}")
+    print(f"  WhatsApp Admin  : {'[OK]' if a_ok else '[FAIL]'}")
 
     return any_success
 
 
 # ---------------------------------------------------------------------------- #
-#  Main                                                                          #
+#  Stage B: Prepare & Send Tomorrow's Preview                                    #
+# ---------------------------------------------------------------------------- #
+
+def run_stage_b_prepare_tomorrow(schedule: list, dry_run: bool = False) -> dict | None:
+    """
+    Executes Stage B:
+    1. Runs youtube_sync.py to check for newly uploaded videos.
+    2. Picks the newest unposted video.
+    3. Renders 4:5 poster via Headless Chrome.
+    4. Marks item as "preview_approved" for tomorrow.
+    5. Sends poster + caption ONLY to Personal WhatsApp (+918919395559).
+    """
+    section("STAGE B: PREPARING & SENDING TOMORROW'S PREVIEW")
+
+    # Ingest any new YouTube uploads
+    try:
+        from youtube_sync import sync_youtube
+        log.info("[Stage B] Running youtube_sync to ensure newest uploads are queued first...")
+        sync_youtube(force_poster=False)
+        schedule = load_schedule()
+    except Exception as exc:
+        log.warning("[Stage B] Sync note: %s", exc)
+
+    # Find candidate
+    candidate = None
+    for item in schedule:
+        if item.get("status") == "preview_approved":
+            candidate = item
+            break
+
+    if not candidate:
+        for item in schedule:
+            if item.get("status") not in ("published", "skipped"):
+                candidate = item
+                break
+
+    if not candidate:
+        log.warning("[Stage B] No unposted videos remaining in queue!")
+        return None
+
+    candidate["status"] = "preview_approved"
+    poster_path = ensure_poster_exists(candidate)
+    remaining_unposted = sum(1 for i in schedule if i.get("status") not in ("published", "skipped") and i.get("id") != candidate["id"])
+
+    preview_caption = build_whatsapp_caption(
+        candidate,
+        is_preview=True,
+        is_admin=True,
+        remaining_unposted=remaining_unposted,
+    )
+
+    log.info("[Stage B] Selected Tomorrow's Candidate: %s (%s)", candidate["id"], candidate.get("title", "")[:45])
+    log.info("[Stage B] Upload Date: %s | Remaining Unposted: %d", candidate.get("upload_date"), remaining_unposted)
+    log.info("[Stage B] Sending Preview ONLY to Personal WhatsApp: %s", WHATSAPP_ADMIN)
+
+    sent = dispatch_whatsapp_media(
+        WHATSAPP_ADMIN,
+        poster_path,
+        preview_caption,
+        tag="admin_preview",
+        dry_run=dry_run,
+    )
+
+    if not dry_run:
+        save_schedule(schedule)
+
+    section(f"STAGE B SUMMARY — TOMORROW'S PREVIEW SENT")
+    print(f"  Tomorrow's Video : [{candidate['id']}] {candidate.get('title','')}")
+    print(f"  Poster File      : {poster_path}")
+    print(f"  Sent to WhatsApp : {'[OK]' if sent else '[FAIL]'} ({WHATSAPP_ADMIN})")
+    print(f"  Queue Remaining  : {remaining_unposted} unposted videos")
+
+    return candidate
+
+
+# ---------------------------------------------------------------------------- #
+#  Skip Tomorrow Control                                                         #
+# ---------------------------------------------------------------------------- #
+
+def run_skip_tomorrow(schedule: list, dry_run: bool = False):
+    """
+    Marks current "preview_approved" video as "skipped",
+    picks the next newest unposted video, generates poster, and sends updated preview.
+    """
+    section("SKIP TOMORROW — REGENERATING NEXT VIDEO")
+
+    current_preview = None
+    for item in schedule:
+        if item.get("status") == "preview_approved":
+            current_preview = item
+            break
+
+    if current_preview:
+        log.info("Marking '%s' (%s) as 'skipped'...", current_preview["id"], current_preview.get("title","")[:40])
+        current_preview["status"] = "skipped"
+    else:
+        log.info("No current 'preview_approved' item found; selecting next unposted item.")
+
+    next_candidate = None
+    for item in schedule:
+        if item.get("status") not in ("published", "skipped"):
+            next_candidate = item
+            break
+
+    if not next_candidate:
+        log.warning("No more unposted videos in queue!")
+        save_schedule(schedule)
+        return
+
+    next_candidate["status"] = "preview_approved"
+    poster_path = ensure_poster_exists(next_candidate)
+    remaining_unposted = sum(1 for i in schedule if i.get("status") not in ("published", "skipped") and i.get("id") != next_candidate["id"])
+
+    preview_caption = build_whatsapp_caption(
+        next_candidate,
+        is_preview=True,
+        is_admin=True,
+        remaining_unposted=remaining_unposted,
+    )
+
+    log.info("Sending Replacement Preview ONLY to Personal WhatsApp: %s", WHATSAPP_ADMIN)
+    dispatch_whatsapp_media(WHATSAPP_ADMIN, poster_path, preview_caption, tag="admin_preview_regen", dry_run=dry_run)
+
+    if not dry_run:
+        save_schedule(schedule)
+
+    print(f"\n  Skipped previous video. New preview locked for tomorrow: [{next_candidate['id']}] {next_candidate.get('title','')}")
+
+
+# ---------------------------------------------------------------------------- #
+#  Main CLI Entrypoint                                                           #
 # ---------------------------------------------------------------------------- #
 
 def main():
-    parser = argparse.ArgumentParser(description="Samartha Vastu Auto Publisher")
-    parser.add_argument("--dry-run",      action="store_true",
-                        help="Simulate publishing without real API calls")
-    parser.add_argument("--publish-next", action="store_true",
-                        help="Force-publish the next pending item regardless of schedule time")
-    parser.add_argument("--item",         type=str, default=None,
-                        help="Publish a specific item by ID (e.g. --item video_01)")
-    parser.add_argument("--skip-whatsapp", action="store_true",
-                        help="Skip WhatsApp dispatch (e.g. if already sent previously)")
-    parser.add_argument("--whatsapp-only", action="store_true",
-                        help="Only dispatch to WhatsApp (skip Facebook and Instagram)")
+    parser = argparse.ArgumentParser(description="Samartha Vastu 2-Stage Daily Auto Publisher")
+    parser.add_argument("--daily-run",         action="store_true",
+                        help="Run full morning cycle: Stage A (publish today) + Stage B (prepare tomorrow)")
+    parser.add_argument("--prepare-tomorrow",  action="store_true",
+                        help="Run Stage B only: prepare & send tomorrow's preview to personal WhatsApp")
+    parser.add_argument("--skip-tomorrow",     action="store_true",
+                        help="Skip currently approved preview, pick next unposted, and send replacement")
+    parser.add_argument("--publish-next",      action="store_true",
+                        help="Publish next/approved item now")
+    parser.add_argument("--dry-run",           action="store_true",
+                        help="Simulate without real API calls")
+    parser.add_argument("--force",             action="store_true",
+                        help="Bypass daily 1-post-per-day lock")
     args = parser.parse_args()
 
     DRY_RUN = args.dry_run
 
-    section("Samartha Vastu Auto Publisher" + (" [DRY-RUN]" if DRY_RUN else " [LIVE]"))
+    section("Samartha Vastu Publisher" + (" [DRY-RUN]" if DRY_RUN else " [LIVE]"))
 
-    # Config check
-    print("\nConfig:")
-    print(f"  FB_PAGE_ID        : {FB_PAGE_ID or '!!! NOT SET'}")
-    print(f"  IG_USER_ID        : {IG_USER_ID or '!!! NOT SET'}")
-    print(f"  META_ACCESS_TOKEN : {'OK (' + META_ACCESS_TOKEN[:8] + '...)' if META_ACCESS_TOKEN else '!!! NOT SET'}")
-    print(f"  YOUTUBE_URL       : {YOUTUBE_URL}")
-    print(f"  CONTACT_PHONE     : {CONTACT_PHONE}")
-    print(f"  CONTACT_EMAIL     : {CONTACT_EMAIL}")
-    print(f"  WHATSAPP_TARGET   : {WHATSAPP_TARGET or '!!! NOT SET'}")
-
-    if not DRY_RUN and not META_ACCESS_TOKEN:
-        log.error("META_ACCESS_TOKEN is not set in .env. Aborting.")
-        sys.exit(1)
-
-    # Load schedule
-    schedule = load_schedule()
-    log.info("Loaded %d items from master_schedule.json", len(schedule))
-
-    # Determine items to publish
-    if args.item:
-        # Specific item by ID
-        targets = [i for i in schedule if i["id"] == args.item]
-        if not targets:
-            log.error("Item '%s' not found in master_schedule.json", args.item)
+    if not DRY_RUN:
+        if not wait_for_internet(timeout_seconds=180):
+            log.error("Aborting run due to lack of internet connectivity.")
             sys.exit(1)
-    elif args.publish_next:
-        # Force next pending
-        nxt = get_next_pending(schedule)
-        targets = [nxt] if nxt else []
-    else:
-        # All items due now
-        targets = get_due_items(schedule)
 
-    if not targets:
-        print("\n  No items are due for publishing right now.")
-        print("  Use --publish-next to force the next pending item,")
-        print("  or --dry-run --publish-next to test the pipeline.\n")
+    schedule = load_schedule()
+
+    if args.skip_tomorrow:
+        run_skip_tomorrow(schedule, dry_run=DRY_RUN)
         return
 
-    log.info("Items to publish: %d", len(targets))
-    published_count = 0
+    if args.prepare_tomorrow:
+        run_stage_b_prepare_tomorrow(schedule, dry_run=DRY_RUN)
+        return
 
-    for item in targets:
-        success = publish_item(item, schedule, DRY_RUN, skip_whatsapp=args.skip_whatsapp, whatsapp_only=args.whatsapp_only)
-        if success:
-            published_count += 1
-        if not DRY_RUN:
-            save_schedule(schedule)   # save after each item
+    if args.publish_next:
+        run_stage_a_public_publish(schedule, dry_run=DRY_RUN, force=args.force)
+        return
 
-    section("DONE")
-    print(f"  Published : {published_count} / {len(targets)} items")
-    if DRY_RUN:
-        print("  Mode      : DRY-RUN (no real posts made, schedule not modified)")
-    print()
+    if args.daily_run:
+        run_stage_a_public_publish(schedule, dry_run=DRY_RUN, force=args.force)
+        refreshed_schedule = load_schedule()
+        run_stage_b_prepare_tomorrow(refreshed_schedule, dry_run=DRY_RUN)
+        return
+
+    print("Please specify a command mode:")
+    print("  --daily-run         : Full daily cycle (Publish today + Prepare tomorrow)")
+    print("  --prepare-tomorrow  : Prepare & send tomorrow's preview to Personal WhatsApp")
+    print("  --skip-tomorrow     : Skip current tomorrow preview and select next video")
+    print("  --publish-next      : Publish next item")
 
 
 if __name__ == "__main__":
