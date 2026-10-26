@@ -65,8 +65,11 @@
     "fb_post_url": "https://www.facebook.com/122237860610350333",
     "ig_media_id": "17994121854110562",
     "ig_post_url": "https://www.instagram.com/p/De8LCrFCQoA/",
-    "wa_sent": false,
-    "cdn_image_url": "https://scontent.ftir1-2.fna.fbcdn.net/v/t39.30808-6/867264891_122237860616350333_5787596427070352666_n.jpg?_nc_cat=101&_nc_map=urlgen_bucketless&ccb=1-7&_nc_sid=e5c1b6&_nc_ohc=Q0AygZhy3kcQ7kNvwF2Y5Bp&_nc_oc=AdoW6Gu4TfPDfQ8uIWWyHczHsVBXZJLoJzbz9u0vZoBdp1WXDIUk8xJI2Gw2iVcH0Ig&_nc_zt=23&_nc_ht=scontent.ftir1-2.fna&edm=AMAeTUEEAAAA&_nc_gid=JDd4BQcMeoNgm6oO7Lb3pg&_nc_tpa=Q5bMBQLM7Ud0ZMzxHAEmx43NFNDNMOUq5YVaZa9-6O5Ab7mOSL-xWc-4DuY5QyTPOIzLMgyRULdBSdhv-w&oh=00_AQM26IVUCzkLGLb42lZfdgezujnyDl2Kq4PPfQ2cpab0-A&oe=6AE48BA7"
+    "wa_sent": true,
+    "cdn_image_url": "https://scontent.ftir1-2.fna.fbcdn.net/v/t39.30808-6/867264891_122237860616350333_5787596427070352666_n.jpg?_nc_cat=101&_nc_map=urlgen_bucketless&ccb=1-7&_nc_sid=e5c1b6&_nc_ohc=Q0AygZhy3kcQ7kNvwF2Y5Bp&_nc_oc=AdoW6Gu4TfPDfQ8uIWWyHczHsVBXZJLoJzbz9u0vZoBdp1WXDIUk8xJI2Gw2iVcH0Ig&_nc_zt=23&_nc_ht=scontent.ftir1-2.fna&edm=AMAeTUEEAAAA&_nc_gid=JDd4BQcMeoNgm6oO7Lb3pg&_nc_tpa=Q5bMBQLM7Ud0ZMzxHAEmx43NFNDNMOUq5YVaZa9-6O5Ab7mOSL-xWc-4DuY5QyTPOIzLMgyRULdBSdhv-w&oh=00_AQM26IVUCzkLGLb42lZfdgezujnyDl2Kq4PPfQ2cpab0-A&oe=6AE48BA7",
+    "yt_short_url": "https://youtube.com/shorts/JpdFgkRnLKs",
+    "wa_group_sent": true,
+    "wa_admin_sent": true
   },
   {
     "id": "yt_2OIWZk99aIw",
@@ -79,9 +82,9 @@
     "is_short": false,
     "discovery_order": 2,
     "thumbnail_file": "vastu_content_queue\\thumbnails\\yt_2OIWZk99aIw.jpg",
-    "has_thumbnail": false,
+    "has_thumbnail": true,
     "has_video": false,
-    "status": "pending",
+    "status": "preview_approved",
     "scheduled_date": "2026-10-27",
     "scheduled_time": "08:00:00",
     "scheduled_at": "2026-10-27T08:00:00",
