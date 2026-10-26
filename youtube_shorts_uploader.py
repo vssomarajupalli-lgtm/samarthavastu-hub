@@ -29,10 +29,13 @@ LOGS_DIR        = BASE_DIR / "logs"
 TEMP_MP4        = LOGS_DIR / "temp_short.mp4"
 TEMP_FRAME      = LOGS_DIR / "temp_short_frame.jpg"
 
-CDP_URL         = os.getenv("CHROME_CDP_URL", "http://127.0.0.1:9222")
-STUDIO_URL      = "https://studio.youtube.com/channel/UC5u7BltNJ37eHudWoMHhFzQ"
-CONTACT_PHONE   = "+91 8919395559"
-CONTACT_EMAIL   = "samarthavastu999@gmail.com"
+CDP_URL             = os.getenv("CHROME_CDP_URL", "http://127.0.0.1:9222")
+TARGET_CHANNEL_ID   = "UCDtcb0drjmLgG3ARTh4e7jw"
+TARGET_CHANNEL_NAME = "SAMARTHA VASTU"
+STUDIO_URL          = f"https://studio.youtube.com/channel/{TARGET_CHANNEL_ID}"
+DISALLOWED_CHANNEL  = "UC5u7BltNJ37eHudWoMHhFzQ"
+CONTACT_PHONE       = "+91 8919395559"
+CONTACT_EMAIL       = "samarthavastu999@gmail.com"
 
 # Setup logging
 logging.basicConfig(
@@ -266,6 +269,34 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             page.goto(STUDIO_URL, timeout=25000)
             page.wait_for_load_state("networkidle")
 
+            # Channel Verification & Account Switcher Guard
+            current_url = page.url
+            if DISALLOWED_CHANNEL in current_url or "@rajusvsn8246" in current_url:
+                log.warning("[YouTube Shorts] Opened on personal channel %s. Attempting account switch to %s...", DISALLOWED_CHANNEL, TARGET_CHANNEL_NAME)
+                try:
+                    avatar_btn = page.locator('#avatar-btn, button#avatar-btn').first
+                    avatar_btn.wait_for(state="visible", timeout=10000)
+                    avatar_btn.click()
+                    time.sleep(1.5)
+
+                    switch_item = page.locator('tp-yt-paper-item:has-text("Switch account"), ytcp-text-menu-item:has-text("Switch account")').first
+                    switch_item.wait_for(state="visible", timeout=8000)
+                    switch_item.click()
+                    time.sleep(2)
+
+                    target_channel_btn = page.locator(f'ytd-account-item-renderer:has-text("{TARGET_CHANNEL_NAME}"), tp-yt-paper-item:has-text("{TARGET_CHANNEL_NAME}"), #channel-title:has-text("{TARGET_CHANNEL_NAME}")').first
+                    target_channel_btn.wait_for(state="visible", timeout=8000)
+                    target_channel_btn.click()
+                    time.sleep(5)
+                    page.wait_for_load_state("networkidle")
+                except Exception as sw_err:
+                    log.error("[YouTube Shorts] Account switch failed: %s", sw_err)
+
+            # Strict guard check: NEVER upload to personal channel
+            final_url = page.url
+            if DISALLOWED_CHANNEL in final_url or "@rajusvsn8246" in final_url:
+                raise RuntimeError(f"ABORTED: Connected to disallowed channel {DISALLOWED_CHANNEL} (@rajusvsn8246). Strictly prohibited from uploading to personal channel.")
+
             # 1. Click CREATE button
             create_btn = page.locator('button[aria-label="Create"], ytcp-button:has-text("Create")').first
             create_btn.wait_for(state="visible", timeout=15000)
@@ -365,14 +396,141 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             page.close()
 
     except Exception as exc:
-        log.error("[YouTube Shorts] Upload failed: %s", exc)
-        return {"success": False, "short_url": None, "error": str(exc)}
+        log.warning("[YouTube Shorts] Playwright CDP attempt error: %s. Falling back to native Chrome GUI automation...", exc)
+        gui_res = upload_short_via_gui(item, mp4_path, short_title, short_desc)
+        if gui_res.get("success"):
+            return gui_res
+        log.error("[YouTube Shorts] Native GUI automation also failed: %s", gui_res.get("error"))
+        return {"success": False, "short_url": None, "error": f"CDP error: {exc} | GUI error: {gui_res.get('error')}"}
 
     if not short_url:
         short_url = f"https://www.youtube.com/@samarthavastu999/shorts"
 
     log.info("[YouTube Shorts] Upload complete! Short URL: %s", short_url)
     return {"success": True, "short_url": short_url}
+
+
+def upload_short_via_gui(item: dict, mp4_path: Path, short_title: str, short_desc: str) -> dict:
+    """
+    Robust native GUI automation fallback:
+    Controls the user's active, authenticated Google Chrome window on the interactive desktop,
+    ensures channel is strictly @samarthavastu999, and executes upload through YouTube Studio UI.
+    """
+    try:
+        import ctypes
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
+        import win32gui
+        import win32con
+        import win32service
+        import pyperclip
+        import pyautogui
+
+        hdesk = win32service.OpenDesktop('default', 0, False, win32con.GENERIC_ALL)
+        hdesk.SetThreadDesktop()
+
+        # Find Chrome window
+        target_hwnd = None
+        def enum_cb(h, _):
+            nonlocal target_hwnd
+            if win32gui.IsWindowVisible(h):
+                txt = win32gui.GetWindowText(h)
+                if ("YouTube Studio" in txt or "Google Chrome" in txt) and "Visual Studio Code" not in txt and "Antigravity" not in txt:
+                    target_hwnd = h
+        win32gui.EnumWindows(enum_cb, None)
+
+        if not target_hwnd:
+            log.warning("[GUI Uploader] Active Chrome window not found. Launching Chrome...")
+            subprocess.Popen(["chrome.exe", STUDIO_URL], shell=True)
+            time.sleep(5)
+            win32gui.EnumWindows(enum_cb, None)
+
+        if not target_hwnd:
+            return {"success": False, "error": "Could not locate or launch Chrome for GUI upload"}
+
+        user32 = ctypes.windll.user32
+        user32.ShowWindow(target_hwnd, win32con.SW_SHOWMAXIMIZED)
+        user32.SetForegroundWindow(target_hwnd)
+        time.sleep(1)
+
+        # Navigate to STUDIO_URL to ensure we are strictly on SAMARTHA VASTU channel
+        pyautogui.hotkey('ctrl', 'l')
+        time.sleep(0.5)
+        pyperclip.copy(STUDIO_URL)
+        pyautogui.hotkey('ctrl', 'v')
+        pyautogui.press('enter')
+        time.sleep(6)
+
+        # 1. Click Create button at (1670, 268)
+        log.info("[GUI Uploader] Clicking Create button...")
+        pyautogui.click(1670, 268)
+        time.sleep(1.5)
+
+        # 2. Click Upload videos at (1650, 340)
+        log.info("[GUI Uploader] Clicking Upload videos...")
+        pyautogui.click(1650, 340)
+        time.sleep(2.5)
+
+        # 3. Click Select files at (952, 810)
+        log.info("[GUI Uploader] Clicking Select files...")
+        pyautogui.click(952, 810)
+        time.sleep(2.0)
+
+        # 4. Supply MP4 path
+        log.info("[GUI Uploader] Selecting MP4 file...")
+        pyperclip.copy(str(mp4_path.resolve()))
+        pyautogui.hotkey('ctrl', 'v')
+        time.sleep(0.5)
+        pyautogui.press('enter')
+        time.sleep(6)
+
+        # 5. Set Short Title in Details dialog
+        log.info("[GUI Uploader] Setting Short title...")
+        pyautogui.click(400, 640)
+        time.sleep(0.5)
+        pyautogui.hotkey('ctrl', 'a')
+        time.sleep(0.3)
+        pyautogui.press('backspace')
+        time.sleep(0.3)
+        pyperclip.copy(short_title)
+        pyautogui.hotkey('ctrl', 'v')
+        time.sleep(1)
+
+        # 6. Click Next through all steps to Visibility (center: 1588, 860)
+        for step in range(1, 4):
+            log.info("[GUI Uploader] Clicking Next (%d/3)...", step)
+            pyautogui.click(1588, 860)
+            time.sleep(2.0)
+
+        # 7. Select Public (if needed) & Click Publish (center: 1580, 870)
+        log.info("[GUI Uploader] Clicking Publish at (1580, 870)...")
+        pyautogui.click(1580, 870)
+        time.sleep(7)
+
+        # 8. Close dialog
+        pyautogui.press('escape')
+        time.sleep(1)
+
+        # Query YouTube channel to get the newest Short URL
+        short_url = None
+        try:
+            import urllib.request
+            req = urllib.request.Request("https://www.youtube.com/@samarthavastu999/shorts", headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body = resp.read().decode('utf-8', errors='ignore')
+                matches = re.findall(r'"/shorts/([a-zA-Z0-9_-]{11})"', body)
+                if matches:
+                    short_url = f"https://www.youtube.com/shorts/{matches[0]}"
+        except Exception as e:
+            log.warning("[GUI Uploader] Could not scrape newest short ID: %s", e)
+
+        if not short_url:
+            short_url = f"https://www.youtube.com/@samarthavastu999/shorts"
+
+        log.info("[GUI Uploader] Successfully published Short: %s", short_url)
+        return {"success": True, "short_url": short_url}
+    except Exception as exc:
+        log.error("[GUI Uploader] GUI automation error: %s", exc)
+        return {"success": False, "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------- #

@@ -42,6 +42,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import logging
 import os
@@ -52,6 +53,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import psutil
 import requests
 from dotenv import load_dotenv
 
@@ -141,27 +143,120 @@ def save_schedule(items: list):
         json.dump(items, f, ensure_ascii=False, indent=2)
 
 
+def wait_for_unlocked_desktop(timeout_sec: int = 1800) -> bool:
+    """
+    Checks if Windows is currently on the Lock Screen (LogonUI.exe or inaccessible input desktop).
+    If screen is locked, waits in a loop checking every 10 seconds until the user unlocks the desktop.
+    Returns True when desktop is unlocked and interactive, False if timed out.
+    """
+    log.info("[Desktop Watcher] Checking if Windows desktop is unlocked...")
+    start_time = time.time()
+    first_locked_notice = False
+
+    while time.time() - start_time < timeout_sec:
+        is_locked = False
+
+        # 1. Check if LogonUI.exe is running (Windows Lock / Login Screen)
+        try:
+            for proc in psutil.process_iter(['name']):
+                if (proc.info.get('name') or '').lower() == 'logonui.exe':
+                    is_locked = True
+                    break
+        except Exception:
+            pass
+
+        # 2. Check OpenInputDesktop
+        if not is_locked:
+            try:
+                h_desk = ctypes.windll.user32.OpenInputDesktop(0, False, 0x0001)
+                if not h_desk:
+                    is_locked = True
+                else:
+                    ctypes.windll.user32.CloseDesktop(h_desk)
+            except Exception:
+                pass
+
+        if not is_locked:
+            if first_locked_notice:
+                elapsed = time.time() - start_time
+                log.info("[Desktop Watcher] User unlocked the desktop after %.1fs! Resuming automation.", elapsed)
+            else:
+                log.info("[Desktop Watcher] Desktop is unlocked and ready.")
+            return True
+
+        if not first_locked_notice:
+            log.warning(
+                "[Desktop Watcher] Windows is currently on Lock Screen (LogonUI). Waiting up to %ds for user to unlock...",
+                timeout_sec
+            )
+            first_locked_notice = True
+
+        time.sleep(10)
+
+    log.error("[Desktop Watcher] Timed out waiting for desktop unlock after %ds.", timeout_sec)
+    return False
+
+
+def is_daily_completed_for_item(item: dict) -> bool:
+    """
+    Checks if an item has successfully completed all 5 distribution channels:
+    1. Facebook Page (fb_post_url)
+    2. Instagram Business (ig_post_url)
+    3. YouTube Shorts (yt_short_url)
+    4. WhatsApp Public Group (wa_group_sent)
+    5. WhatsApp Personal Admin (wa_admin_sent)
+    """
+    has_fb = bool(item.get("fb_post_url"))
+    has_ig = bool(item.get("ig_post_url"))
+    has_yt = bool(item.get("yt_short_url"))
+    has_wa_grp = bool(item.get("wa_group_sent"))
+    has_wa_adm = bool(item.get("wa_admin_sent"))
+    has_wa = bool(item.get("wa_sent") or (has_wa_grp and has_wa_adm))
+    return bool(has_fb and has_ig and has_yt and has_wa)
+
+
 def check_daily_published_lock(schedule: list, force: bool = False) -> bool:
     """
-    Checks if a post was already published to public today (YYYY-MM-DD).
-    Returns True if safe to publish to public, False if already published today.
+    Checks if all channels (FB, IG, YouTube Shorts, WhatsApp Group & Personal Admin)
+    have completed for today (YYYY-MM-DD).
+    Returns True (locked for the day) ONLY when an item published today has:
+      - fb_post_url
+      - ig_post_url
+      - yt_short_url
+      - wa_sent == True (or both wa_group_sent and wa_admin_sent)
+    If any single channel was missed earlier in the day, returns False so the
+    catch-up trigger automatically resumes and finishes only the missing channel(s).
     """
     if force:
         log.info("[Daily Lock] --force flag supplied: 1-post-per-day lock bypassed.")
-        return True
+        return False
 
     today_str = datetime.now().strftime("%Y-%m-%d")
     for item in schedule:
-        if item.get("status") == "published":
-            pub_at = item.get("published_at") or ""
-            if pub_at.startswith(today_str):
-                log.info("[Daily Lock Active] A post was ALREADY published to public today (%s):", today_str)
-                log.info("  Item ID : %s", item.get("id"))
-                log.info("  Title   : %s", (item.get("title") or "")[:50])
-                log.info("  Time    : %s", pub_at)
-                log.info("Skipping public re-publication to maintain strict 1-post-per-day rule.")
+        pub_at = item.get("published_at") or ""
+        sched_date = item.get("scheduled_date") or ""
+        is_today = pub_at.startswith(today_str) or sched_date == today_str
+        if is_today and item.get("status") == "published":
+            if is_daily_completed_for_item(item):
+                log.info("[Daily Lock Active] Today's post (%s) is 100%% complete across ALL channels:", today_str)
+                log.info("  Item ID      : %s", item.get("id"))
+                log.info("  Title        : %s", (item.get("title") or "")[:50])
+                log.info("  FB URL       : %s", item.get("fb_post_url"))
+                log.info("  IG URL       : %s", item.get("ig_post_url"))
+                log.info("  Short URL    : %s", item.get("yt_short_url"))
+                log.info("  WA Group/Adm : %s / %s", item.get("wa_group_sent"), item.get("wa_admin_sent"))
+                log.info("Strict 1-post-per-day lock is ACTIVE. Exiting in <1s.")
+                return True
+            else:
+                log.info("[Daily Lock Inactive] Today's post (%s) is INCOMPLETE across channels:", today_str)
+                log.info("  FB: %s | IG: %s | Shorts: %s | WA Group: %s | WA Admin: %s",
+                         bool(item.get("fb_post_url")), bool(item.get("ig_post_url")),
+                         bool(item.get("yt_short_url")), bool(item.get("wa_group_sent")),
+                         bool(item.get("wa_admin_sent")))
+                log.info("Resuming missing channel(s) now...")
                 return False
-    return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------- #
@@ -467,6 +562,9 @@ def dispatch_whatsapp_media(
         log.info("[WhatsApp] DRY-RUN — would send to: %s", target)
         return True
 
+    # Ensure desktop is unlocked before automating Chrome / WhatsApp Web
+    wait_for_unlocked_desktop(timeout_sec=1800)
+
     from whatsapp_sender import send_whatsapp_media
 
     try:
@@ -554,21 +652,20 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
     section("STAGE A: PUBLISHING TODAY'S VIDEO TO PUBLIC")
 
     # Daily Lock Check
-    if not dry_run and not check_daily_published_lock(schedule, force=force):
+    if not dry_run and not force and check_daily_published_lock(schedule, force=force):
         return True
 
     # Find the target item:
-    # 1. If force: first check if today's item is incomplete across channels (e.g. missing WhatsApp or YouTube Shorts)
+    # 1. First check if today's item is incomplete across channels (e.g. missing WhatsApp, YouTube Shorts, etc.)
     today_str = datetime.now().strftime("%Y-%m-%d")
     target_item = None
-    if force:
-        for item in schedule:
-            if (item.get("scheduled_date") == today_str or (item.get("published_at") or "").startswith(today_str)) and (
-                not item.get("wa_sent") or not item.get("yt_short_url")
-            ):
-                target_item = item
-                log.info("[Stage A] Resuming today's incomplete post: %s (%s)", item["id"], item.get("title", "")[:40])
-                break
+    for item in schedule:
+        pub_at = item.get("published_at") or ""
+        sched_date = item.get("scheduled_date") or ""
+        if (pub_at.startswith(today_str) or sched_date == today_str) and not is_daily_completed_for_item(item):
+            target_item = item
+            log.info("[Stage A] Resuming today's incomplete post: %s (%s)", item["id"], item.get("title", "")[:40])
+            break
 
     # 2. Look for "preview_approved" item
     if not target_item:
@@ -645,6 +742,7 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
         }
     else:
         try:
+            wait_for_unlocked_desktop(timeout_sec=1800)
             from youtube_shorts_uploader import upload_short_to_youtube
             yt_res = upload_short_to_youtube(target_item, dry_run=dry_run)
             if yt_res.get("success") and not dry_run:
@@ -988,6 +1086,10 @@ def main():
         return
 
     if args.daily_run:
+        # If today's run is already 100% completed across all 5 channels, exit silently in <1 second
+        if not args.force and check_daily_published_lock(schedule, force=False):
+            return
+
         run_stage_a_public_publish(schedule, dry_run=DRY_RUN, force=args.force)
         refreshed_schedule = load_schedule()
         run_stage_b_prepare_tomorrow(refreshed_schedule, dry_run=DRY_RUN)
