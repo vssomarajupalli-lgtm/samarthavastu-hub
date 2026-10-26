@@ -493,7 +493,23 @@ def sync_youtube(force_poster: bool = True) -> dict:
     shorts = fetch_flat_channel_entries(CHANNEL_SHORTS_URL, is_short=True)
     log.info("Found %d shorts on channel.", len(shorts))
 
-    all_channel_entries = videos + shorts
+    # Known full video IDs and recorded short URLs for loop prevention
+    known_full_vids = {item.get("video_id") for item in schedule if item.get("video_id")}
+    known_short_urls = {item.get("yt_short_url") for item in schedule if item.get("yt_short_url")}
+
+    # Filter out auto-generated promotional Shorts to prevent ingestion loops
+    filtered_shorts = []
+    for s in shorts:
+        s_title = s.get("title", "")
+        if "#Shorts #SamarthaVastu" in s_title or ("#Shorts" in s_title and "#SamarthaVastu" in s_title):
+            log.info("Loop Prevention: Skipping promotional Short by title: [%s] %s", s["video_id"], s_title[:45])
+            continue
+        if any(s["video_id"] in (url or "") for url in known_short_urls):
+            log.info("Loop Prevention: Skipping known uploaded Short URL: %s", s["video_id"])
+            continue
+        filtered_shorts.append(s)
+
+    all_channel_entries = videos + filtered_shorts
     discovered_vids = {e["video_id"]: e for e in all_channel_entries}
 
     # 2. Identify items needing upload_date & metadata
@@ -536,6 +552,12 @@ def sync_youtube(force_poster: bool = True) -> dict:
             title = meta.get("title") or entry.get("title") or "సమర్థ వాస్తు"
             upload_date = meta.get("upload_date") or ""
             desc = meta.get("description") or ""
+
+            # Extra check on description for shorts
+            if entry["is_short"]:
+                if "#Shorts #SamarthaVastu" in desc or any(f"watch?v={k_vid}" in desc for k_vid in known_full_vids if k_vid):
+                    log.info("Loop Prevention: Skipping promotional Short by metadata desc: %s", vid)
+                    continue
 
             item_dict = {
                 "id": sched_id,

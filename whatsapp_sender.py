@@ -54,6 +54,9 @@ def attach_to_default_desktop():
 def force_chrome_foreground() -> int:
     """Finds the Chrome window and forces it to the foreground reliably."""
     attach_to_default_desktop()
+    import win32process
+    import psutil
+
     target_hwnd = None
 
     def enum_win(hwnd, _):
@@ -61,7 +64,22 @@ def force_chrome_foreground() -> int:
         if win32gui.IsWindowVisible(hwnd):
             title = win32gui.GetWindowText(hwnd)
             if "Google Chrome" in title and "Graph API Explorer" not in title:
-                target_hwnd = hwnd
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                try:
+                    cmdline = " ".join(psutil.Process(pid).cmdline())
+                except Exception:
+                    cmdline = ""
+                is_antigravity = "antigravity" in cmdline
+                # Priority 1: Window that already has WhatsApp in title
+                if "WhatsApp" in title:
+                    target_hwnd = hwnd
+                    return False
+                # Priority 2: User personal Chrome (not antigravity profile)
+                if not is_antigravity and not target_hwnd:
+                    target_hwnd = hwnd
+                elif not target_hwnd:
+                    target_hwnd = hwnd
+        return True
 
     win32gui.EnumWindows(enum_win, None)
 

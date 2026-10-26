@@ -57,20 +57,27 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- Logging ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
-log = logging.getLogger("auto_publisher")
-
 # --- Paths ---
 BASE_DIR        = Path(__file__).resolve().parent
 QUEUE_DIR       = BASE_DIR / "vastu_content_queue"
 THUMBNAILS_DIR  = QUEUE_DIR / "thumbnails"
 SCHEDULE_FILE   = QUEUE_DIR / "master_schedule.json"
-SCREENSHOTS_DIR = BASE_DIR / "logs" / "screenshots"
+LOGS_DIR        = BASE_DIR / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+DAILY_LOG_FILE  = LOGS_DIR / "daily_run.log"
+SCREENSHOTS_DIR = LOGS_DIR / "screenshots"
+
+# --- Logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(DAILY_LOG_FILE, encoding="utf-8"),
+    ]
+)
+log = logging.getLogger("auto_publisher")
 
 # --- Meta Graph API ---
 GRAPH_VERSION = "v21.0"
@@ -253,11 +260,15 @@ def build_whatsapp_caption(
     is_preview: bool = False,
     is_admin: bool = False,
     remaining_unposted: int = 0,
+    fb_status: bool = True,
+    ig_status: bool = True,
+    yt_short_status: bool = False,
+    yt_short_url: str = "",
 ) -> str:
     """
     Builds WhatsApp formatted caption under 1000 characters to prevent modal overflow.
     If is_preview: prefixes with [TOMORROW'S PREVIEW — FOR YOUR CHECK ONLY].
-    If is_admin: appends 3-line status receipt.
+    If is_admin: appends channel publishing receipt.
     """
     title    = (item.get("title") or "").strip()
     raw_desc = item.get("description") or item.get("caption") or ""
@@ -286,7 +297,13 @@ def build_whatsapp_caption(
         footer_lines.append("")
         footer_lines.append("---")
         footer_lines.append("📊 *Daily Publishing Status:*")
-        footer_lines.append(f"✅ *Published Today:* {title[:45]}")
+        footer_lines.append(f"✅ *Published Today:* {title[:40]}")
+        fb_ico = "✅" if fb_status else "❌"
+        ig_ico = "✅" if ig_status else "❌"
+        yt_ico = "✅" if yt_short_status else "❌"
+        footer_lines.append(f"🌐 FB: {fb_ico} | 📸 IG: {ig_ico} | ⚡ Short: {yt_ico}")
+        if yt_short_url:
+            footer_lines.append(f"⚡ Short: {yt_short_url}")
         footer_lines.append(f"⏳ *Remaining Queue:* {remaining_unposted} unposted videos")
 
     footer = "\n".join(footer_lines)
@@ -540,13 +557,27 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
     if not dry_run and not check_daily_published_lock(schedule, force=force):
         return True
 
-    # Find the target item: look for "preview_approved" first, then earliest pending
+    # Find the target item:
+    # 1. If force: first check if today's item is incomplete across channels (e.g. missing WhatsApp or YouTube Shorts)
+    today_str = datetime.now().strftime("%Y-%m-%d")
     target_item = None
-    for item in schedule:
-        if item.get("status") == "preview_approved":
-            target_item = item
-            break
+    if force:
+        for item in schedule:
+            if (item.get("scheduled_date") == today_str or (item.get("published_at") or "").startswith(today_str)) and (
+                not item.get("wa_sent") or not item.get("yt_short_url")
+            ):
+                target_item = item
+                log.info("[Stage A] Resuming today's incomplete post: %s (%s)", item["id"], item.get("title", "")[:40])
+                break
 
+    # 2. Look for "preview_approved" item
+    if not target_item:
+        for item in schedule:
+            if item.get("status") == "preview_approved":
+                target_item = item
+                break
+
+    # 3. Fallback to earliest pending
     if not target_item:
         for item in schedule:
             if item.get("status") not in ("published", "skipped"):
@@ -566,7 +597,7 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
     log.info("Poster Path: %s", poster_path)
     log.info("Unposted Remaining: %d", remaining_unposted)
 
-    # 1. Facebook Page
+    # 1. Facebook Page + First Comment
     if target_item.get("fb_post_url"):
         log.info("[Facebook] Already published for %s: %s (Skipping re-post)", item_id, target_item["fb_post_url"])
         fb_res = {
@@ -587,7 +618,7 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
     fb_post_url = fb_res.get("post_url", "")
     cdn_img_url = fb_res.get("cdn_image_url") or target_item.get("cdn_image_url")
 
-    # 2. Instagram
+    # 2. Instagram Business
     if target_item.get("ig_post_url"):
         log.info("[Instagram] Already published for %s: %s (Skipping re-post)", item_id, target_item["ig_post_url"])
         ig_res = {
@@ -605,9 +636,38 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
     ig_media_id = ig_res.get("media_id")
     ig_post_url = ig_res.get("post_url", "")
 
-    # 3. WhatsApp Public Group & Personal WhatsApp
+    # 3. YouTube Shorts (@samarthavastu999)
+    if target_item.get("yt_short_url"):
+        log.info("[YouTube Shorts] Already published for %s: %s (Skipping re-upload)", item_id, target_item["yt_short_url"])
+        yt_res = {
+            "success": True,
+            "short_url": target_item["yt_short_url"],
+        }
+    else:
+        try:
+            from youtube_shorts_uploader import upload_short_to_youtube
+            yt_res = upload_short_to_youtube(target_item, dry_run=dry_run)
+            if yt_res.get("success") and not dry_run:
+                target_item["yt_short_url"] = yt_res.get("short_url")
+                save_schedule(schedule)
+        except Exception as exc:
+            log.error("[YouTube Shorts] Upload error: %s", exc)
+            yt_res = {"success": False, "short_url": None, "error": str(exc)}
+
+    yt_short_url = yt_res.get("short_url") or target_item.get("yt_short_url", "")
+
+    # 4. WhatsApp Public Group & Personal WhatsApp
     group_caption = build_whatsapp_caption(target_item, is_preview=False, is_admin=False)
-    admin_caption = build_whatsapp_caption(target_item, is_preview=False, is_admin=True, remaining_unposted=remaining_unposted)
+    admin_caption = build_whatsapp_caption(
+        target_item,
+        is_preview=False,
+        is_admin=True,
+        remaining_unposted=remaining_unposted,
+        fb_status=bool(fb_res.get("success")),
+        ig_status=bool(ig_res.get("success")),
+        yt_short_status=bool(yt_res.get("success")),
+        yt_short_url=yt_short_url,
+    )
 
     g_ok = target_item.get("wa_group_sent", False)
     if g_ok:
@@ -630,19 +690,22 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
             target_item["wa_admin_sent"] = True
             save_schedule(schedule)
 
-    any_success = fb_res.get("success") or ig_res.get("success") or g_ok or a_ok
+    any_success = fb_res.get("success") or ig_res.get("success") or yt_res.get("success") or g_ok or a_ok
     if any_success and not dry_run:
-        target_item["status"]       = "published"
+        target_item["status"]        = "published"
         if not target_item.get("published_at"):
             target_item["published_at"] = datetime.now().isoformat()
-        target_item["fb_post_id"]   = fb_post_id
-        target_item["fb_post_url"]  = fb_post_url
-        target_item["ig_media_id"]  = ig_media_id
-        target_item["ig_post_url"]  = ig_post_url
-        target_item["wa_sent"]      = bool(g_ok and a_ok)
+        target_item["fb_post_id"]    = fb_post_id
+        target_item["fb_post_url"]   = fb_post_url
+        target_item["ig_media_id"]   = ig_media_id
+        target_item["ig_post_url"]   = ig_post_url
+        target_item["yt_short_url"]  = yt_short_url
+        target_item["wa_group_sent"] = bool(g_ok)
+        target_item["wa_admin_sent"] = bool(a_ok)
+        target_item["wa_sent"]       = bool(g_ok and a_ok)
         save_schedule(schedule)
 
-        # Update Website Data & Auto Git Sync
+        # 5. Update Website Data & Auto Git Sync
         try:
             from website_sync import sync_website_data
             log.info("[Website Sync] Updating public/videos_data.json and index.html...")
@@ -652,10 +715,11 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
             log.warning("[Post-Publish Sync] Note: %s", exc)
 
     section(f"STAGE A SUMMARY for {item_id}")
-    print(f"  Facebook  : {'[OK]' if fb_res.get('success') else '[FAIL]'}  {fb_post_url}")
-    print(f"  Instagram : {'[OK]' if ig_res.get('success') else '[FAIL]'}  {ig_post_url}")
-    print(f"  WhatsApp Group  : {'[OK]' if g_ok else '[FAIL]'}")
-    print(f"  WhatsApp Admin  : {'[OK]' if a_ok else '[FAIL]'}")
+    print(f"  Facebook       : {'[OK]' if fb_res.get('success') else '[FAIL]'}  {fb_post_url}")
+    print(f"  Instagram      : {'[OK]' if ig_res.get('success') else '[FAIL]'}  {ig_post_url}")
+    print(f"  YouTube Short  : {'[OK]' if yt_res.get('success') else '[FAIL]'}  {yt_short_url}")
+    print(f"  WhatsApp Group : {'[OK]' if g_ok else '[FAIL]'}")
+    print(f"  WhatsApp Admin : {'[OK]' if a_ok else '[FAIL]'}")
 
     return any_success
 

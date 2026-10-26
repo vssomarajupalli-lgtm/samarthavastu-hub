@@ -21,8 +21,13 @@ $TriggerLogon.Delay = 'PT1M'
 # StartWhenAvailable ($true): if machine was off at 8:00 AM, task runs upon boot
 $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 1)
 
-# Register task
-$Task = Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger @($TriggerDaily, $TriggerLogon) -Settings $Settings -Description "Samartha Vastu Daily 8:00 AM and Boot Catch-up Auto Publisher" -Force
+try {
+    $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+    $Task = Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger @($TriggerDaily, $TriggerLogon) -Settings $Settings -Principal $Principal -Description "Samartha Vastu Daily 8:00 AM and Boot Catch-up Auto Publisher" -Force
+} catch {
+    Write-Warning "Could not register with RunLevel Highest (requires Admin). Updating existing task with interactive settings..."
+    Set-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $TriggerDaily -Settings $Settings
+}
 
 Write-Host "`nTask successfully registered:"
 Get-ScheduledTask -TaskName $TaskName | Format-List TaskName, State, Description
