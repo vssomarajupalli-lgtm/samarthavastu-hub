@@ -234,8 +234,7 @@ def check_daily_published_lock(schedule: list, force: bool = False) -> bool:
     today_str = datetime.now().strftime("%Y-%m-%d")
     for item in schedule:
         pub_at = item.get("published_at") or ""
-        sched_date = item.get("scheduled_date") or ""
-        is_today = pub_at.startswith(today_str) or sched_date == today_str
+        is_today = pub_at.startswith(today_str)
         if is_today and item.get("status") == "published":
             if is_daily_completed_for_item(item):
                 log.info("[Daily Lock Active] Today's post (%s) is 100%% complete across ALL channels:", today_str)
@@ -385,7 +384,7 @@ def build_whatsapp_caption(
     if is_preview:
         footer_lines.append("")
         footer_lines.append("---")
-        footer_lines.append("📊 *Status:* Locked for Tomorrow's Morning Post")
+        footer_lines.append("📊 *Status:* Locked in Queue for Next Session (Hold & Carry-Forward Active)")
         footer_lines.append(f"⏳ *Remaining Queue:* {remaining_unposted} unposted videos")
         footer_lines.append("(To skip or change: python auto_publisher.py --skip-tomorrow)")
     elif is_admin:
@@ -661,8 +660,7 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
     target_item = None
     for item in schedule:
         pub_at = item.get("published_at") or ""
-        sched_date = item.get("scheduled_date") or ""
-        if (pub_at.startswith(today_str) or sched_date == today_str) and not is_daily_completed_for_item(item):
+        if pub_at.startswith(today_str) and not is_daily_completed_for_item(item):
             target_item = item
             log.info("[Stage A] Resuming today's incomplete post: %s (%s)", item["id"], item.get("title", "")[:40])
             break
@@ -791,6 +789,7 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
     any_success = fb_res.get("success") or ig_res.get("success") or yt_res.get("success") or g_ok or a_ok
     if any_success and not dry_run:
         target_item["status"]        = "published"
+        target_item["scheduled_date"] = datetime.now().strftime("%Y-%m-%d")
         if not target_item.get("published_at"):
             target_item["published_at"] = datetime.now().isoformat()
         target_item["fb_post_id"]    = fb_post_id

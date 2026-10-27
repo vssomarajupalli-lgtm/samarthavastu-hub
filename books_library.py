@@ -4,7 +4,7 @@ books_library.py
 Samartha Vastu - External Classical Books Catalog & 3-Page Telugu Preview Library
 
 Zero PDF files stored locally.
-Curates 15 classical and reference books across 5 pillars:
+Curates 16 classical and reference books across 5 pillars:
   1. వాస్తు శాస్త్రం (Vastu Shastra)
   2. జ్యోతిష్య శాస్త్రం (Jyotisha Shastra)
   3. తాంత్రిక విద్యలు (Tantrika Vidyalu)
@@ -50,6 +50,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "కాశీభట్ల సుబ్బరాయ శాస్త్రి గారి తెలుగు ప్రతి (DLI)",
         "google_drive_url": "",
         "archive_id": "in.ernet.dli.2015.372226",
+        "language_badge": "[తెలుగు తాత్పర్యం]",
+        "archive_search_url": "https://archive.org/search?query=Vishwakarma+Prakashika&and[]=mediatype%3A%22texts%22",
         "cover_theme": "maroon_gold",
         "icon": "🏡",
         "pages_preview": [
@@ -104,6 +106,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "మయవాస్తు - శ్రీపతి ప్రెస్ తెలుగు టీక",
         "google_drive_url": "",
         "archive_id": "MayaVastu",
+        "language_badge": "[సంస్కృతం - తెలుగు]",
+        "archive_search_url": "https://archive.org/search?query=Mayamatam+Vastu&and[]=mediatype%3A%22texts%22",
         "cover_theme": "navy_gold",
         "icon": "🏛️",
         "pages_preview": [
@@ -155,6 +159,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "",
         "google_drive_url": "",
         "archive_id": "in.ernet.dli.2015.31240",
+        "language_badge": "[Sanskrit / English]",
+        "archive_search_url": "https://archive.org/search?query=Manasara+Vastu&and[]=mediatype%3A%22texts%22",
         "cover_theme": "maroon_gold",
         "icon": "📐",
         "pages_preview": [
@@ -202,6 +208,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "",
         "google_drive_url": "",
         "archive_id": "in.ernet.dli.2015.345259",
+        "language_badge": "[సంస్కృతం - తెలుగు]",
+        "archive_search_url": "https://archive.org/search?query=Samarangana+Sutradhara&and[]=mediatype%3A%22texts%22",
         "cover_theme": "emerald_gold",
         "icon": "🏰",
         "pages_preview": [
@@ -250,6 +258,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "పరాశర జ్యోతిష్యము - సంపూర్ణ తెలుగు అనువాదం",
         "google_drive_url": "",
         "archive_id": "ParasharaJyotishayam",
+        "language_badge": "[తెలుగు తాత్పర్యం]",
+        "archive_search_url": "https://archive.org/search?query=Brihat+Parashara+Hora+Shastra&and[]=mediatype%3A%22texts%22",
         "cover_theme": "navy_gold",
         "icon": "🪐",
         "pages_preview": [
@@ -300,6 +310,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "ఆలూరు వాసుదేవశాస్త్రి గారి తెలుగు టీక (వావిళ్ల)",
         "google_drive_url": "",
         "archive_id": "bruhajjatakamu-aluru",
+        "language_badge": "[సంస్కృతం - తెలుగు]",
+        "archive_search_url": "https://archive.org/search?query=Brihat+Jataka+Varahamihira&and[]=mediatype%3A%22texts%22",
         "cover_theme": "maroon_gold",
         "icon": "🌌",
         "pages_preview": [
@@ -348,6 +360,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "ఫలదీపిక - సంపూర్ణ తెలుగు వివరణ",
         "google_drive_url": "",
         "archive_id": "Phaladeepika",
+        "language_badge": "[తెలుగు తాత్పర్యం]",
+        "archive_search_url": "https://archive.org/search?query=Phaladeepika+Mantreswara&and[]=mediatype%3A%22texts%22",
         "cover_theme": "emerald_gold",
         "icon": "📜",
         "pages_preview": [
@@ -395,6 +409,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "ముహూర్త చింతామణి - ఆంధ్ర తాత్పర్య సహితం",
         "google_drive_url": "",
         "archive_id": "20231001_20231001_1351",
+        "language_badge": "[తెలుగు తాత్పర్యం]",
+        "archive_search_url": "https://archive.org/search?query=Muhurtha+Chintamani&and[]=mediatype%3A%22texts%22",
         "cover_theme": "maroon_gold",
         "icon": "⏳",
         "pages_preview": [
@@ -443,6 +459,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "మంత్ర యంత్ర తంత్ర శాస్త్ర సంగ్రహము (తెలుగు)",
         "google_drive_url": "",
         "archive_id": "33-mantra-sastramu-mantra-yantra-tantra-in-telugu",
+        "language_badge": "[తెలుగు తాత్పర్యం]",
+        "archive_search_url": "https://archive.org/search?query=Mahanirvana+Tantra&and[]=mediatype%3A%22texts%22",
         "cover_theme": "maroon_gold",
         "icon": "🔱",
         "pages_preview": [
@@ -491,6 +509,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "శారదా తిలకం తంత్రం (తెలుగు తాత్పర్యం)",
         "google_drive_url": "",
         "archive_id": "sarada-tilaka-tantram-in-telugu",
+        "language_badge": "[తెలుగు తాత్పర్యం]",
+        "archive_search_url": "https://archive.org/search?query=Sharada+Tilaka+Tantram&and[]=mediatype%3A%22texts%22",
         "cover_theme": "navy_gold",
         "icon": "✨",
         "pages_preview": [
@@ -537,6 +557,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "",
         "google_drive_url": "",
         "archive_id": "in.ernet.dli.2015.541533",
+        "language_badge": "[సంస్కృతం - తెలుగు]",
+        "archive_search_url": "https://archive.org/search?query=Yantra+Chintamani&and[]=mediatype%3A%22texts%22",
         "cover_theme": "emerald_gold",
         "icon": "🔯",
         "pages_preview": [
@@ -583,6 +605,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "",
         "google_drive_url": "",
         "archive_id": "mantra-mahodadhi",
+        "language_badge": "[సంస్కృతం - తెలుగు]",
+        "archive_search_url": "https://archive.org/search?query=Mantra+Mahodadhi&and[]=mediatype%3A%22texts%22",
         "cover_theme": "maroon_gold",
         "icon": "📿",
         "pages_preview": [
@@ -631,6 +655,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "గరుడ పురాణం - ప్రేత ఖండం (సరళ తెలుగు వచనం)",
         "google_drive_url": "",
         "archive_id": "garuda-puranam-simple-telugu",
+        "language_badge": "[తెలుగు తాత్పర్యం]",
+        "archive_search_url": "https://archive.org/search?query=Garuda+Purana+Preta+Khanda&and[]=mediatype%3A%22texts%22",
         "cover_theme": "navy_gold",
         "icon": "🔮",
         "pages_preview": [
@@ -679,6 +705,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "కఠోపనిషత్తు - వావిళ్ల తెలుగు తాత్పర్యం (DLI)",
         "google_drive_url": "",
         "archive_id": "in.ernet.dli.2015.333841",
+        "language_badge": "[తెలుగు తాత్పర్యం]",
+        "archive_search_url": "https://archive.org/search?query=Katha+Upanishad+Telugu&and[]=mediatype%3A%22texts%22",
         "cover_theme": "maroon_gold",
         "icon": "⚡",
         "pages_preview": [
@@ -729,6 +757,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "యోగ వాసిష్ఠము / వాసిష్ఠ రామాయణము (తెలుగు)",
         "google_drive_url": "",
         "archive_id": "YogavasisthaTeluguTranslationBook1Of8",
+        "language_badge": "[తెలుగు తాత్పర్యం]",
+        "archive_search_url": "https://archive.org/search?query=Yoga+Vasistha+Telugu&and[]=mediatype%3A%22texts%22",
         "cover_theme": "emerald_gold",
         "icon": "🕉️",
         "pages_preview": [
@@ -779,6 +809,8 @@ CLASSICAL_BOOKS_CATALOG = [
         "telugu_edition_label": "శ్రీ దేవీ భాగవతము (ములుగు పాపయారాధ్యుల తెలుగు కావ్యం)",
         "google_drive_url": "",
         "archive_id": "sri-devi-bhagavatam-telugu",
+        "language_badge": "[తెలుగు తాత్పర్యం]",
+        "archive_search_url": "https://archive.org/search?query=Devi+Bhagavatam+Telugu&and[]=mediatype%3A%22texts%22",
         "cover_theme": "maroon_gold",
         "icon": "🛕",
         "pages_preview": [

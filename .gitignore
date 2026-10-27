@@ -10,6 +10,7 @@ logs/
 *.png
 !public/*.png
 !public/*.jpg
+!public/assets/**
 PyWhatKit_DB.txt
 
 # Media Files
