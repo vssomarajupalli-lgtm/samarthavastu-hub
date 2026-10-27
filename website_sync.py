@@ -24,6 +24,9 @@ import json
 import logging
 import os
 import re
+import shutil
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -44,6 +47,8 @@ OUTPUT_JSON     = PUBLIC_DIR / "videos_data.json"
 LEGACY_JSON     = PUBLIC_DIR / "videos.json"
 BOOKS_JSON_FILE = PUBLIC_DIR / "books_data.json"
 INDEX_HTML_FILE = PUBLIC_DIR / "index.html"
+QUEUE_THUMBS_DIR = QUEUE_DIR / "thumbnails"
+PUBLIC_THUMBS_DIR = PUBLIC_DIR / "thumbnails"
 
 
 def clean_title(title: str) -> str:
@@ -276,6 +281,84 @@ def generate_telugu_summary(title: str, description: str, category_slug: str) ->
     return f"{s1} {s2} {s3}"
 
 
+
+def sync_thumbnails(schedule: list[dict]):
+    """
+    Ensures all generated JPEG posters in vastu_content_queue/thumbnails/ and root folders
+    are reliably copied into public/thumbnails/.
+    For any schedule item without a local thumbnail, downloads it from YouTube
+    so that every video in videos_data.json has a valid local thumbnail image file.
+    """
+    PUBLIC_THUMBS_DIR.mkdir(parents=True, exist_ok=True)
+    QUEUE_THUMBS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 1. Copy all posters from vastu_content_queue/thumbnails/ to public/thumbnails/
+    if QUEUE_THUMBS_DIR.exists():
+        for f in QUEUE_THUMBS_DIR.glob("*.*"):
+            if f.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]:
+                dest = PUBLIC_THUMBS_DIR / f.name
+                if not dest.exists() or dest.stat().st_size != f.stat().st_size:
+                    shutil.copy2(f, dest)
+                    log.info("Synced queue thumbnail: %s -> %s", f.name, dest)
+
+    # 2. Copy posters from root folder (e.g. yt_*.jpg, video_*.jpg, *.jpg)
+    for ext in ("*.jpg", "*.jpeg", "*.png"):
+        for f in BASE_DIR.glob(ext):
+            dest = PUBLIC_THUMBS_DIR / f.name
+            if not dest.exists() or dest.stat().st_size != f.stat().st_size:
+                shutil.copy2(f, dest)
+                log.info("Synced root thumbnail: %s -> %s", f.name, dest)
+
+    # 3. Ensure every item in schedule has a working local thumbnail
+    missing_items = []
+    for item in schedule:
+        vid = item.get("video_id")
+        item_id = item.get("id") or (f"yt_{vid}" if vid else "")
+        if not item_id:
+            continue
+
+        target_file = PUBLIC_THUMBS_DIR / f"{item_id}.jpg"
+        if target_file.exists():
+            continue
+
+        # Check if item's thumbnail_file attribute exists on disk
+        thumb_ref = item.get("thumbnail_file")
+        if thumb_ref:
+            p_ref = Path(thumb_ref)
+            if not p_ref.is_absolute():
+                p_ref = BASE_DIR / p_ref
+            if p_ref.exists():
+                shutil.copy2(p_ref, target_file)
+                continue
+
+        # If not on disk and it's a YouTube video, download from YouTube CDN
+        if vid:
+            missing_items.append((item_id, vid, target_file))
+
+    if missing_items:
+        log.info("Fetching %d missing video thumbnails from YouTube CDN...", len(missing_items))
+
+        def fetch_thumb(entry: tuple[str, str, Path]) -> bool:
+            i_id, v_id, dest = entry
+            url = f"https://img.youtube.com/vi/{v_id}/hqdefault.jpg"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = resp.read()
+                    if len(data) > 1000:
+                        dest.write_bytes(data)
+                        q_cache = QUEUE_THUMBS_DIR / f"{i_id}.jpg"
+                        if not q_cache.exists():
+                            q_cache.write_bytes(data)
+                        return True
+            except Exception as exc:
+                log.warning("Could not download thumbnail for %s (%s): %s", i_id, v_id, exc)
+            return False
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(fetch_thumb, missing_items))
+        log.info("Successfully fetched %d/%d missing thumbnails into %s", sum(1 for r in results if r), len(missing_items), PUBLIC_THUMBS_DIR)
+
 def sync_website_data() -> dict:
     log.info("Starting website data synchronization from master_schedule.json...")
 
@@ -288,6 +371,9 @@ def sync_website_data() -> dict:
 
     if not isinstance(schedule, list):
         schedule = schedule.get("items", [])
+
+    # Ensure thumbnails are synced and cached
+    sync_thumbnails(schedule)
 
     # Ensure books catalog is generated
     generate_books_data()
@@ -310,12 +396,18 @@ def sync_website_data() -> dict:
         category_slug, category_label = categorize_video(item)
         summary_te = generate_telugu_summary(title, raw_desc, category_slug)
 
-        thumb_url = f"https://img.youtube.com/vi/{vid}/hqdefault.jpg"
+        item_id = item.get("id", f"yt_{vid}")
+        target_thumb_file = PUBLIC_THUMBS_DIR / f"{item_id}.jpg"
+        if target_thumb_file.exists():
+            thumb_url = f"thumbnails/{item_id}.jpg"
+        else:
+            thumb_url = f"https://img.youtube.com/vi/{vid}/hqdefault.jpg"
+
         video_url = f"https://www.youtube.com/shorts/{vid}" if is_short else f"https://www.youtube.com/watch?v={vid}"
 
         # High-efficiency, slimmed schema (strips all raw boilerplate bloat)
         slim_videos.append({
-            "id": item.get("id", f"yt_{vid}"),
+            "id": item_id,
             "video_id": vid,
             "title": title,
             "category": category_slug,
@@ -368,6 +460,7 @@ def update_index_html_embedded_data(videos: list[dict]):
         client_videos = [
             {
                 "id": v["id"],
+                "video_id": v.get("video_id", ""),
                 "title": v["title"],
                 "category": v["category"],
                 "category_label": v["category_label"],
