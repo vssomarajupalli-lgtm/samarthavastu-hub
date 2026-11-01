@@ -68,6 +68,88 @@ LOGS_DIR        = BASE_DIR / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 DAILY_LOG_FILE  = LOGS_DIR / "daily_run.log"
 SCREENSHOTS_DIR = LOGS_DIR / "screenshots"
+PUBLISHER_LOCK  = LOGS_DIR / "publisher.lock"
+
+# --- Single-instance publisher lock ---
+_LOCK_FD = None
+_STABILIZED = False
+
+def acquire_publisher_lock() -> bool:
+    """Acquire an OS-level single-instance lock on logs/publisher.lock.
+    Returns True if lock acquired, False if another instance holds it."""
+    global _LOCK_FD
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            _LOCK_FD = os.open(str(PUBLISHER_LOCK), os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                msvcrt.locking(_LOCK_FD, msvcrt.LK_NBLCK, 1)
+            except OSError:
+                os.close(_LOCK_FD)
+                _LOCK_FD = None
+                return False
+        else:
+            import fcntl
+            _LOCK_FD = os.open(str(PUBLISHER_LOCK), os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                fcntl.flock(_LOCK_FD, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(_LOCK_FD)
+                _LOCK_FD = None
+                return False
+        return True
+    except Exception:
+        _LOCK_FD = None
+        return False
+
+
+def release_publisher_lock():
+    """Release the single-instance publisher lock."""
+    global _LOCK_FD
+    if _LOCK_FD is not None:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(_LOCK_FD, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(_LOCK_FD, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            os.close(_LOCK_FD)
+        except Exception:
+            pass
+        _LOCK_FD = None
+        try:
+            PUBLISHER_LOCK.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def wait_for_stabilization(seconds: int = 300):
+    """Silent stabilization delay after desktop unlock so laptop startup settles.
+    Does not print progress to avoid slowing perceived boot."""
+    log.info("[Startup Gate] Stabilization delay: waiting %ds after desktop unlock before publishing...", seconds)
+    time.sleep(seconds)
+    log.info("[Startup Gate] Stabilization delay complete.")
+
+
+def show_confirmation_dialog(video_title: str) -> bool:
+    """Native Windows MsgBox Yes/No confirmation before launching a publishing run.
+    Returns True if Yes, False if No."""
+    try:
+        result = ctypes.windll.user32.MessageBoxW(
+            0,
+            f"Publish queued video now?\n\nTitle: {video_title}\n\n[Yes] = Proceed with publishing\n[No] = Cancel and keep item in preview-approved hold for next session",
+            "Samartha Vastu - Publishing Confirmation",
+            0x00000004 | 0x00000020,  # MB_YESNO | MB_ICONQUESTION
+        )
+        return result == 6  # IDYES = 6
+    except Exception as exc:
+        log.warning("[Startup Gate] Confirmation dialog failed: %s — defaulting to No (safe exit).", exc)
+        return False
 
 # --- Logging ---
 logging.basicConfig(
@@ -624,6 +706,10 @@ def auto_git_sync(title: str = ""):
             
             remotes = subprocess.run(["git", "remote"], cwd=str(BASE_DIR), capture_output=True, text=True).stdout
             if "origin" in remotes.split():
+                log.info("[Git Auto-Sync] Running git pull --rebase before push...")
+                pull_res = subprocess.run(["git", "pull", "--rebase", "origin", "main"], cwd=str(BASE_DIR), capture_output=True, text=True)
+                if pull_res.returncode != 0:
+                    log.warning("[Git Auto-Sync] Rebase pull note: %s", pull_res.stderr)
                 log.info("[Git Auto-Sync] Pushing to GitHub origin/main...")
                 push_res = subprocess.run(["git", "push", "origin", "main"], cwd=str(BASE_DIR), capture_output=True, text=True)
                 if push_res.returncode == 0:
@@ -1054,19 +1140,118 @@ def main():
     parser.add_argument("--dry-run",           action="store_true",
                         help="Simulate without real API calls")
     parser.add_argument("--force",             action="store_true",
-                        help="Bypass daily 1-post-per-day lock")
+                        help="Bypass daily 1-post-per-day lock and skip 5-minute stabilization")
+    parser.add_argument("--manual",            action="store_true",
+                        help="Manual run from Publish_Now.bat - skips 5-minute stabilization delay")
     args = parser.parse_args()
 
     DRY_RUN = args.dry_run
+    MANUAL_RUN = args.manual or args.force
+
+    # --- Single-instance lock: prevent dual-process race condition ---
+    if not acquire_publisher_lock():
+        print("[FATAL] Another auto_publisher instance is already running (logs/publisher.lock held). Exiting to prevent race condition.")
+        sys.exit(1)
+    try:
+        import atexit
+        atexit.register(release_publisher_lock)
+    except Exception:
+        pass
 
     section("Samartha Vastu Publisher" + (" [DRY-RUN]" if DRY_RUN else " [LIVE]"))
+
+    # (b) Daily Lock FIRST — if today's post is already 100% complete across
+    #     all channels, exit silently in <1s WITHOUT waiting 5 minutes and
+    #     WITHOUT showing any Yes/No MessageBox.
+    if not DRY_RUN:
+        schedule_for_lock = load_schedule()
+        if not args.force and check_daily_published_lock(schedule_for_lock, force=False):
+            release_publisher_lock()
+            return
 
     if not DRY_RUN:
         if not wait_for_internet(timeout_seconds=180):
             log.error("Aborting run due to lack of internet connectivity.")
+            release_publisher_lock()
             sys.exit(1)
 
     schedule = load_schedule()
+
+    # (c) Wait until Windows desktop is unlocked (LogonUI.exe absent).
+    if not DRY_RUN:
+        if not wait_for_unlocked_desktop(timeout_sec=1800):
+            log.error("[Desktop Watcher] Could not proceed — desktop remained locked.")
+            release_publisher_lock()
+            sys.exit(1)
+
+    # (d) 300-second stabilization delay ONLY on scheduled/boot runs.
+    #     Skip if --force or --manual is passed.
+    if not DRY_RUN and not MANUAL_RUN and not _STABILIZED:
+        _STABILIZED = True
+        wait_for_stabilization(300)
+
+    # (e) Show topmost Yes/No MessageBox BEFORE Facebook or Instagram runs.
+    target_item_for_dialog = None
+    if args.whatsapp_only:
+        for item in schedule:
+            if item.get("status") == "preview_approved":
+                target_item_for_dialog = item
+                break
+        if not target_item_for_dialog:
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            for item in schedule:
+                if item.get("status") == "published" and (item.get("published_at") or "").startswith(today_str):
+                    target_item_for_dialog = item
+                    break
+        if not target_item_for_dialog:
+            for item in schedule:
+                if item.get("status") not in ("published", "skipped"):
+                    target_item_for_dialog = item
+                    break
+
+    if args.skip_tomorrow:
+        for item in schedule:
+            if item.get("status") == "preview_approved":
+                target_item_for_dialog = item
+                break
+
+    if args.prepare_tomorrow:
+        candidate = None
+        for item in schedule:
+            if item.get("status") == "preview_approved":
+                candidate = item
+                break
+        if not candidate:
+            for item in schedule:
+                if item.get("status") not in ("published", "skipped"):
+                    candidate = item
+                    break
+        target_item_for_dialog = candidate
+
+    if args.publish_next or args.daily_run:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        for item in schedule:
+            pub_at = item.get("published_at") or ""
+            if pub_at.startswith(today_str) and not is_daily_completed_for_item(item):
+                target_item_for_dialog = item
+                break
+        if not target_item_for_dialog:
+            for item in schedule:
+                if item.get("status") == "preview_approved":
+                    target_item_for_dialog = item
+                    break
+        if not target_item_for_dialog:
+            for item in schedule:
+                if item.get("status") not in ("published", "skipped"):
+                    target_item_for_dialog = item
+                    break
+
+    if target_item_for_dialog and not DRY_RUN:
+        dialog_title = target_item_for_dialog.get("title") or target_item_for_dialog.get("id", "Unknown")
+        if not show_confirmation_dialog(dialog_title):
+            log.info("[Startup Gate] User clicked No — exiting safely (exit 0). Item remains queued for next session.")
+            release_publisher_lock()
+            return
 
     if args.whatsapp_only:
         run_whatsapp_only(schedule, dry_run=DRY_RUN)
@@ -1085,10 +1270,6 @@ def main():
         return
 
     if args.daily_run:
-        # If today's run is already 100% completed across all 5 channels, exit silently in <1 second
-        if not args.force and check_daily_published_lock(schedule, force=False):
-            return
-
         run_stage_a_public_publish(schedule, dry_run=DRY_RUN, force=args.force)
         refreshed_schedule = load_schedule()
         run_stage_b_prepare_tomorrow(refreshed_schedule, dry_run=DRY_RUN)

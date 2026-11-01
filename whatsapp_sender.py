@@ -52,10 +52,19 @@ def attach_to_default_desktop():
 
 
 def force_chrome_foreground() -> int:
-    """Finds the Chrome window and forces it to the foreground reliably."""
+    """Finds an existing WhatsApp Web Chrome window, or launches an isolated Chrome
+    instance bound to a dedicated WhatsApp profile so it never hijacks active work tabs."""
     attach_to_default_desktop()
     import win32process
     import psutil
+    import subprocess
+
+    WHATSAPP_USER_DATA = r"E:\samarthavastu-hub\chrome_whatsapp_profile"
+    CHROME_BIN = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    if not os.path.exists(CHROME_BIN):
+        CHROME_BIN = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+    if not os.path.exists(CHROME_BIN):
+        CHROME_BIN = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")
 
     target_hwnd = None
 
@@ -69,22 +78,40 @@ def force_chrome_foreground() -> int:
                     cmdline = " ".join(psutil.Process(pid).cmdline())
                 except Exception:
                     cmdline = ""
-                is_antigravity = "antigravity" in cmdline
-                # Priority 1: Window that already has WhatsApp in title
-                if "WhatsApp" in title:
-                    target_hwnd = hwnd
-                    return False
-                # Priority 2: User personal Chrome (not antigravity profile)
-                if not is_antigravity and not target_hwnd:
-                    target_hwnd = hwnd
-                elif not target_hwnd:
-                    target_hwnd = hwnd
+                # Only consider Chrome windows launched with the dedicated WhatsApp user-data-dir
+                if WHATSAPP_USER_DATA in cmdline:
+                    if "WhatsApp" in title:
+                        target_hwnd = hwnd
+                        return False
+                    if not target_hwnd:
+                        target_hwnd = hwnd
         return True
 
     win32gui.EnumWindows(enum_win, None)
 
     if not target_hwnd:
-        log.warning("[WhatsApp Sender] No active Chrome window found.")
+        log.info("[WhatsApp Sender] No isolated WhatsApp Chrome found. Launching dedicated instance...")
+        os.makedirs(WHATSAPP_USER_DATA, exist_ok=True)
+        subprocess.Popen(
+            [
+                CHROME_BIN,
+                f"--user-data-dir={WHATSAPP_USER_DATA}",
+                "--profile-directory=Default",
+                "--remote-debugging-port=9222",
+                "https://web.whatsapp.com",
+            ],
+            shell=True,
+        )
+        # Wait for the window to appear
+        for _ in range(30):
+            time.sleep(1)
+            target_hwnd = None
+            win32gui.EnumWindows(enum_win, None)
+            if target_hwnd:
+                break
+
+    if not target_hwnd:
+        log.warning("[WhatsApp Sender] No isolated Chrome window found for WhatsApp Web.")
         return 0
 
     kernel32 = ctypes.windll.kernel32
@@ -93,9 +120,8 @@ def force_chrome_foreground() -> int:
     fg_window = user32.GetForegroundWindow()
     fg_thread = user32.GetWindowThreadProcessId(fg_window, 0)
 
-    # Send Alt key event to unlock Windows SetForegroundWindow restrictions
-    user32.keybd_event(0x12, 0, 0, 0)  # Alt down
-    user32.keybd_event(0x12, 0, 2, 0)  # Alt up
+    user32.keybd_event(0x12, 0, 0, 0)
+    user32.keybd_event(0x12, 0, 2, 0)
 
     if cur_thread != fg_thread:
         user32.AttachThreadInput(cur_thread, fg_thread, True)
@@ -110,7 +136,7 @@ def force_chrome_foreground() -> int:
 
     time.sleep(1)
     fg = win32gui.GetForegroundWindow()
-    log.info("[WhatsApp Sender] Brought Chrome to foreground (HWND: %s, Title: '%s')", fg, win32gui.GetWindowText(fg))
+    log.info("[WhatsApp Sender] Brought isolated WhatsApp Chrome to foreground (HWND: %s, Title: '%s')", fg, win32gui.GetWindowText(fg))
     return target_hwnd
 
 
@@ -137,7 +163,8 @@ def is_phone_number(target: str) -> bool:
 
 
 def navigate_to_target(target: str):
-    """Navigates to the WhatsApp Web target using the active Chrome window or webbrowser."""
+    """Navigates to the WhatsApp Web target using the isolated Chrome window only.
+    Never hijacks the user's active work tabs."""
     if is_phone_number(target):
         clean_num = target.replace(" ", "").replace("-", "")
         if not clean_num.startswith("+"):
@@ -149,7 +176,7 @@ def navigate_to_target(target: str):
     log.info("[WhatsApp Sender] Target URL: %s", url)
     hwnd = force_chrome_foreground()
     if hwnd:
-        log.info("[WhatsApp Sender] Navigating address bar (Ctrl+L)...")
+        log.info("[WhatsApp Sender] Navigating address bar (Ctrl+L) in isolated WhatsApp Chrome...")
         pyautogui.hotkey("ctrl", "l")
         time.sleep(0.5)
         pyperclip.copy(url)
@@ -158,7 +185,7 @@ def navigate_to_target(target: str):
         time.sleep(0.2)
         pyautogui.press("enter")
     else:
-        log.info("[WhatsApp Sender] Opening via default browser...")
+        log.warning("[WhatsApp Sender] Isolated Chrome unavailable — falling back to default browser.")
         webbrowser.open(url)
     return url
 
@@ -170,7 +197,7 @@ def send_whatsapp_media(
     output_dir: str = r"E:\samarthavastu-hub\logs\screenshots",
     target_tag: str = "",
     wait_load: int = 25,
-    close_tab: bool = False,
+    close_tab: bool = True,
 ) -> dict:
     """
     Sends an image + Telugu caption to WhatsApp Web target with visual screenshot verification.

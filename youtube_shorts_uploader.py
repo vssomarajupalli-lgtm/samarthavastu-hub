@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -36,6 +37,68 @@ STUDIO_URL          = f"https://studio.youtube.com/channel/{TARGET_CHANNEL_ID}"
 DISALLOWED_CHANNEL  = "UC5u7BltNJ37eHudWoMHhFzQ"
 CONTACT_PHONE       = "+91 8919395559"
 CONTACT_EMAIL       = "samarthavastu999@gmail.com"
+
+# --- Unified isolated Chrome automation profile ---
+AUTOMATION_CHROME_PROFILE = r"E:\samarthavastu-hub\chrome_whatsapp_profile"
+CHROME_CDP_PORT = 9222
+CHROME_BIN_CANDIDATES = [
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+]
+
+
+def find_chrome_bin() -> str:
+    for c in CHROME_BIN_CANDIDATES:
+        if c and os.path.exists(c):
+            return c
+    return "chrome.exe"
+
+
+def port_is_listening(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> bool:
+    """Return True if a TCP listener is accepting connections on host:port."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def ensure_chrome_cdp() -> bool:
+    """
+    Ensure Chrome is running with --remote-debugging-port=9222 on the isolated
+    automation profile so Playwright CDP can connect. Never touches the user's
+    personal Chrome profiles.
+    """
+    if port_is_listening(CHROME_CDP_PORT):
+        log.info("[YouTube Shorts] Chrome CDP already listening on port %d.", CHROME_CDP_PORT)
+        return True
+
+    chrome_bin = find_chrome_bin()
+    os.makedirs(AUTOMATION_CHROME_PROFILE, exist_ok=True)
+
+    log.info("[YouTube Shorts] Launching isolated Chrome for CDP on port %d...", CHROME_CDP_PORT)
+    subprocess.Popen(
+        [
+            chrome_bin,
+            f"--user-data-dir={AUTOMATION_CHROME_PROFILE}",
+            f"--remote-debugging-port={CHROME_CDP_PORT}",
+            "--start-minimized",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ],
+        shell=True,
+    )
+
+    # Wait up to 10 seconds for port 9222 to accept connections
+    for _ in range(20):
+        time.sleep(0.5)
+        if port_is_listening(CHROME_CDP_PORT):
+            log.info("[YouTube Shorts] Chrome CDP is now listening on port %d.", CHROME_CDP_PORT)
+            return True
+
+    log.error("[YouTube Shorts] Chrome CDP port %d did not accept connections within 10s.", CHROME_CDP_PORT)
+    return False
 
 # Setup logging
 logging.basicConfig(
@@ -118,18 +181,6 @@ def create_shorts_video(poster_path: str | Path, output_mp4: str | Path = TEMP_M
     draw.rectangle([0, poster_y - 2, cw, poster_y], fill=accent_gold)
     draw.rectangle([0, poster_y + 1350, cw, poster_y + 1352], fill=accent_gold)
     draw.rectangle([0, ch - 8, cw, ch], fill=accent_gold)
-
-    # Top banner typography
-    font_header = get_telugu_font(46, bold=True)
-    font_sub    = get_telugu_font(22, bold=True)
-
-    h_txt = "సమర్థ వాస్తు"
-    hb = draw.textbbox((0, 0), h_txt, font=font_header)
-    draw.text(((cw - (hb[2] - hb[0])) // 2, 75), h_txt, font=font_header, fill=light_gold)
-
-    s_txt = "SAMARTHA VASTU #SHORTS"
-    sb = draw.textbbox((0, 0), s_txt, font=font_sub)
-    draw.text(((cw - (sb[2] - sb[0])) // 2, 155), s_txt, font=font_sub, fill=(215, 175, 75))
 
     # Bottom banner typography
     b_txt = f"🎥 పూర్తి వీడియో కోసం లింక్ చూడండి  |  📞 {CONTACT_PHONE}"
@@ -228,9 +279,11 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
     """
     item_id = item.get("id", "")
     existing_url = item.get("yt_short_url")
-    if existing_url:
+    if existing_url and "gg3nNP0kueg" not in existing_url and "@samarthavastu999/shorts" not in existing_url:
         log.info("[YouTube Shorts] Already uploaded for %s: %s (Skipping)", item_id, existing_url)
         return {"success": True, "short_url": existing_url, "already_uploaded": True}
+    if existing_url:
+        log.warning("[YouTube Shorts] Stale/fallback URL detected for %s: %s — will re-upload to get correct short URL", item_id, existing_url)
 
     poster_file = item.get("thumbnail_file") or f"vastu_content_queue/thumbnails/{item_id}.jpg"
     poster_path = Path(poster_file)
@@ -259,6 +312,10 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
 
     short_url = None
     try:
+        # Ensure isolated Chrome with CDP on port 9222 is running before connecting.
+        if not ensure_chrome_cdp():
+            return {"success": False, "short_url": None, "error": "Chrome CDP on port 9222 could not be started"}
+
         with sync_playwright() as p:
             log.info("[YouTube Shorts] Connecting to Chrome CDP at %s...", CDP_URL)
             browser = p.chromium.connect_over_cdp(CDP_URL, timeout=10000)
@@ -396,15 +453,12 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             page.close()
 
     except Exception as exc:
-        log.warning("[YouTube Shorts] Playwright CDP attempt error: %s. Falling back to native Chrome GUI automation...", exc)
-        gui_res = upload_short_via_gui(item, mp4_path, short_title, short_desc)
-        if gui_res.get("success"):
-            return gui_res
-        log.error("[YouTube Shorts] Native GUI automation also failed: %s", gui_res.get("error"))
-        return {"success": False, "short_url": None, "error": f"CDP error: {exc} | GUI error: {gui_res.get('error')}"}
+        log.error("[YouTube Shorts] Playwright CDP failed: %s. Blind GUI coordinate fallback is disabled — will not hijack user's personal Chrome windows.", exc)
+        return {"success": False, "short_url": None, "error": f"CDP error: {exc}"}
 
     if not short_url:
-        short_url = f"https://www.youtube.com/@samarthavastu999/shorts"
+        log.error("[YouTube Shorts] No short URL captured from YouTube Studio UI after publish.")
+        return {"success": False, "error": "No short URL captured from YouTube Studio UI"}
 
     log.info("[YouTube Shorts] Upload complete! Short URL: %s", short_url)
     return {"success": True, "short_url": short_url}
@@ -510,7 +564,7 @@ def upload_short_via_gui(item: dict, mp4_path: Path, short_title: str, short_des
         pyautogui.press('escape')
         time.sleep(1)
 
-        # Query YouTube channel to get the newest Short URL
+        # Query YouTube channel to get the newest Short URL — NEVER scrape channel page for a pre-existing short.
         short_url = None
         try:
             import urllib.request
@@ -519,14 +573,19 @@ def upload_short_via_gui(item: dict, mp4_path: Path, short_title: str, short_des
                 body = resp.read().decode('utf-8', errors='ignore')
                 matches = re.findall(r'"/shorts/([a-zA-Z0-9_-]{11})"', body)
                 if matches:
-                    short_url = f"https://www.youtube.com/shorts/{matches[0]}"
+                    candidate = f"https://www.youtube.com/shorts/{matches[0]}"
+                    # Only accept if it is NOT the known stale/fallback ID
+                    if "gg3nNP0kueg" not in candidate:
+                        short_url = candidate
+                        log.info("[GUI Uploader] Verified newest short URL: %s", short_url)
+                    else:
+                        log.warning("[GUI Uploader] Scraped short is the stale fallback gg3nNP0kueg — rejecting.")
         except Exception as e:
             log.warning("[GUI Uploader] Could not scrape newest short ID: %s", e)
 
         if not short_url:
-            short_url = f"https://www.youtube.com/@samarthavastu999/shorts"
-
-        log.info("[GUI Uploader] Successfully published Short: %s", short_url)
+            log.error("[GUI Uploader] No valid short URL could be verified after publish. Aborting URL assignment.")
+            return {"success": False, "error": "Could not verify uploaded short URL after publish"}
         return {"success": True, "short_url": short_url}
     except Exception as exc:
         log.error("[GUI Uploader] GUI automation error: %s", exc)
