@@ -139,16 +139,31 @@ def wait_for_stabilization(seconds: int = 300):
 def show_confirmation_dialog(video_title: str) -> bool:
     """Native Windows MsgBox Yes/No confirmation before launching a publishing run.
     Returns True if Yes, False if No."""
+    DECLINED_FILE = LOGS_DIR / "declined_today.txt"
     try:
         result = ctypes.windll.user32.MessageBoxW(
             0,
             f"Publish queued video now?\n\nTitle: {video_title}\n\n[Yes] = Proceed with publishing\n[No] = Cancel and keep item in preview-approved hold for next session",
             "Samartha Vastu - Publishing Confirmation",
-            0x00000004 | 0x00000020,  # MB_YESNO | MB_ICONQUESTION
+            0x00000004 | 0x00000020 | 0x00010000 | 0x00010000,  # MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND
         )
-        return result == 6  # IDYES = 6
+        if result == 6:  # IDYES = 6
+            return True
+        # User clicked No: record daily snooze so hourly task stops badgering
+        try:
+            DECLINED_FILE.parent.mkdir(parents=True, exist_ok=True)
+            DECLINED_FILE.write_text(datetime.now().strftime("%Y-%m-%d"), encoding="utf-8")
+        except Exception:
+            pass
+        log.info("[Startup Gate] User clicked No — daily snooze recorded in %s.", DECLINED_FILE)
+        return False
     except Exception as exc:
         log.warning("[Startup Gate] Confirmation dialog failed: %s — defaulting to No (safe exit).", exc)
+        try:
+            DECLINED_FILE.parent.mkdir(parents=True, exist_ok=True)
+            DECLINED_FILE.write_text(datetime.now().strftime("%Y-%m-%d"), encoding="utf-8")
+        except Exception:
+            pass
         return False
 
 # --- Logging ---
@@ -221,8 +236,22 @@ def load_schedule() -> list:
 
 def save_schedule(items: list):
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
+    tmp_file = SCHEDULE_FILE.with_suffix(SCHEDULE_FILE.suffix + ".tmp")
+    bak_file = SCHEDULE_FILE.with_suffix(SCHEDULE_FILE.suffix + ".bak")
+    if SCHEDULE_FILE.exists():
+        try:
+            os.replace(SCHEDULE_FILE, bak_file)
+        except OSError:
+            pass
+    with open(tmp_file, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_file, SCHEDULE_FILE)
+    try:
+        bak_file.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def wait_for_unlocked_desktop(timeout_sec: int = 1800) -> bool:
@@ -1168,6 +1197,17 @@ def main():
         if not args.force and check_daily_published_lock(schedule_for_lock, force=False):
             release_publisher_lock()
             return
+
+    # (b2) Daily Snooze — if user clicked No earlier today on an automatic run,
+    #      exit silently in <1s so the hourly Scheduled Task stops re-prompting.
+    if not DRY_RUN and not MANUAL_RUN:
+        declined_file = LOGS_DIR / "declined_today.txt"
+        try:
+            if declined_file.exists() and declined_file.read_text(encoding="utf-8").strip() == datetime.now().strftime("%Y-%m-%d"):
+                release_publisher_lock()
+                return
+        except Exception:
+            pass
 
     if not DRY_RUN:
         if not wait_for_internet(timeout_seconds=180):

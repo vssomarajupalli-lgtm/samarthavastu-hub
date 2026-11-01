@@ -32,6 +32,20 @@ import win32con
 import win32gui
 import win32service
 
+# DPI awareness so PyAutoGUI coordinates (e.g. (1000, 940)) stay exact
+# regardless of Windows display scaling.
+try:
+    ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+except Exception:
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:
+        pass
+
+# Module-level handle to the last isolated Chrome window we brought to foreground,
+# so we can minimize it after the final WhatsApp dispatch.
+_AUTOMATION_CHROME_HWND = None
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -137,6 +151,8 @@ def force_chrome_foreground() -> int:
     time.sleep(1)
     fg = win32gui.GetForegroundWindow()
     log.info("[WhatsApp Sender] Brought isolated WhatsApp Chrome to foreground (HWND: %s, Title: '%s')", fg, win32gui.GetWindowText(fg))
+    global _AUTOMATION_CHROME_HWND
+    _AUTOMATION_CHROME_HWND = target_hwnd
     return target_hwnd
 
 
@@ -320,6 +336,16 @@ def send_whatsapp_media(
     if close_tab:
         log.info("[WhatsApp Sender] Closing tab via Ctrl+W...")
         pyautogui.hotkey("ctrl", "w")
+
+    # Minimize the isolated Chrome window after the final dispatch so the
+    # user's desktop returns cleanly to their own work.
+    global _AUTOMATION_CHROME_HWND
+    if _AUTOMATION_CHROME_HWND:
+        try:
+            ctypes.windll.user32.ShowWindow(_AUTOMATION_CHROME_HWND, win32con.SW_MINIMIZE)
+            log.info("[WhatsApp Sender] Minimized isolated Chrome window (HWND: %s).", _AUTOMATION_CHROME_HWND)
+        except Exception:
+            pass
 
     log.info("[WhatsApp Sender] Successfully completed dispatch for %s!", target)
     return {

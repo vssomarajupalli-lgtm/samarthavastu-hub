@@ -68,7 +68,8 @@ def ensure_chrome_cdp() -> bool:
     """
     Ensure Chrome is running with --remote-debugging-port=9222 on the isolated
     automation profile so Playwright CDP can connect. Never touches the user's
-    personal Chrome profiles.
+    personal Chrome profiles. Self-heals: terminates stale automation-profile
+    Chrome processes, removes stale SingletonLock, then relaunches.
     """
     if port_is_listening(CHROME_CDP_PORT):
         log.info("[YouTube Shorts] Chrome CDP already listening on port %d.", CHROME_CDP_PORT)
@@ -76,6 +77,30 @@ def ensure_chrome_cdp() -> bool:
 
     chrome_bin = find_chrome_bin()
     os.makedirs(AUTOMATION_CHROME_PROFILE, exist_ok=True)
+
+    # Terminate ONLY chrome.exe processes bound to the automation profile.
+    import psutil
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            cmdline = proc.info.get('cmdline') or []
+            cmdline_str = " ".join(cmdline)
+            if proc.info.get('name', '').lower() == 'chrome.exe' and AUTOMATION_CHROME_PROFILE in cmdline_str:
+                log.info("[YouTube Shorts] Terminating stale automation Chrome (PID %d) holding profile lock.", proc.info['pid'])
+                proc.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    # Wait for processes to exit and release the profile lock.
+    time.sleep(2)
+
+    # Remove stale SingletonLock if present so Chrome can reuse the profile.
+    singleton_lock = os.path.join(AUTOMATION_CHROME_PROFILE, "SingletonLock")
+    if os.path.exists(singleton_lock):
+        try:
+            os.remove(singleton_lock)
+            log.info("[YouTube Shorts] Removed stale SingletonLock in automation profile.")
+        except OSError:
+            pass
 
     log.info("[YouTube Shorts] Launching isolated Chrome for CDP on port %d...", CHROME_CDP_PORT)
     subprocess.Popen(
@@ -119,8 +144,22 @@ def load_schedule() -> list:
 
 def save_schedule(items: list):
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
+    tmp_file = SCHEDULE_FILE.with_suffix(SCHEDULE_FILE.suffix + ".tmp")
+    bak_file = SCHEDULE_FILE.with_suffix(SCHEDULE_FILE.suffix + ".bak")
+    if SCHEDULE_FILE.exists():
+        try:
+            os.replace(SCHEDULE_FILE, bak_file)
+        except OSError:
+            pass
+    with open(tmp_file, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_file, SCHEDULE_FILE)
+    try:
+        bak_file.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def get_telugu_font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont:
@@ -182,8 +221,8 @@ def create_shorts_video(poster_path: str | Path, output_mp4: str | Path = TEMP_M
     draw.rectangle([0, poster_y + 1350, cw, poster_y + 1352], fill=accent_gold)
     draw.rectangle([0, ch - 8, cw, ch], fill=accent_gold)
 
-    # Bottom banner typography
-    b_txt = f"🎥 పూర్తి వీడియో కోసం లింక్ చూడండి  |  📞 {CONTACT_PHONE}"
+    # Bottom banner typography (ASCII/English only — zero PIL Telugu)
+    b_txt = "WATCH FULL VIDEO: @SAMARTHAVASTU999  |  WHATSAPP: +91 8919395559"
     bb = draw.textbbox((0, 0), b_txt, font=font_sub)
     draw.text(((cw - (bb[2] - bb[0])) // 2, 1740), b_txt, font=font_sub, fill=ivory_white)
 

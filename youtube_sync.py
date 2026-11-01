@@ -82,8 +82,22 @@ def load_schedule() -> list:
 
 def save_schedule(items: list):
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
+    tmp_file = SCHEDULE_FILE.with_suffix(SCHEDULE_FILE.suffix + ".tmp")
+    bak_file = SCHEDULE_FILE.with_suffix(SCHEDULE_FILE.suffix + ".bak")
+    if SCHEDULE_FILE.exists():
+        try:
+            os.replace(SCHEDULE_FILE, bak_file)
+        except OSError:
+            pass
+    with open(tmp_file, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_file, SCHEDULE_FILE)
+    try:
+        bak_file.unlink(missing_ok=True)
+    except OSError:
+        pass
     log.info("Saved %d items to %s", len(items), SCHEDULE_FILE)
 
 
@@ -348,119 +362,26 @@ def generate_qr_code(url: str, size: int = 128) -> Image.Image:
 
 def generate_branded_poster(item: dict, output_path: str | Path) -> str:
     """
-    Creates a 4:5 (1080x1350) branded poster:
-    - Gold "సమర్థ వాస్తు" header
-    - High-res YouTube thumbnail fitted in frame
-    - Telugu video title in clear ivory text
-    - Scannable QR code to YouTube video
-    - Footer with phone, email, and consultation link
+    Creates a 4:5 (1080x1350) branded poster via Headless Chrome (HarfBuzz-shaped Telugu).
+    Delegates to html_poster_generator.render_html_to_poster for flawless Indic rendering.
+    Zero PIL Telugu text drawing remains in this function.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    video_id = item.get("video_id", "")
-    title = (item.get("title") or "సమర్థ వాస్తు").strip()
-    is_short = item.get("is_short", False)
-    yt_url = f"https://www.youtube.com/shorts/{video_id}" if is_short else f"https://www.youtube.com/watch?v={video_id}"
-
-    # 1. Canvas with dark maroon radial gradient
-    canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), BG_COLOR)
-    draw = ImageDraw.Draw(canvas)
-
-    for y in range(CANVAS_H):
-        t = y / CANVAS_H
-        r = int(BG_COLOR[0] + (38 - BG_COLOR[0]) * t * 0.45)
-        g = int(BG_COLOR[1] + (8 - BG_COLOR[1]) * t * 0.3)
-        b = int(BG_COLOR[2] + (8 - BG_COLOR[2]) * t * 0.3)
-        draw.line([(0, y), (CANVAS_W, y)], fill=(r, g, b))
-
-    # Top gold accent bar
-    draw.rectangle([0, 0, CANVAS_W, 6], fill=ACCENT_COLOR)
-
-    # 2. Header: "సమర్థ వాస్తు"
-    font_tel_header = load_font(48, telugu=True, bold=True)
-    font_eng_sub    = load_font(20, telugu=False, bold=False)
-
-    header_text = "సమర్థ వాస్తు"
-    bbox_h = draw.textbbox((0, 0), header_text, font=font_tel_header)
-    hw = bbox_h[2] - bbox_h[0]
-    draw.text(((CANVAS_W - hw) // 2, 22), header_text, font=font_tel_header, fill=ACCENT_LIGHT)
-
-    sub_text = "SAMARTHA VASTU  |  వాస్తు శాస్త్రం"
-    bbox_s = draw.textbbox((0, 0), sub_text, font=font_eng_sub)
-    sw = bbox_s[2] - bbox_s[0]
-    draw.text(((CANVAS_W - sw) // 2, 85), sub_text, font=font_eng_sub, fill=(215, 175, 75))
-
-    # Gold separator line with diamond
-    def draw_sep(y_pos: int):
-        draw.line([(50, y_pos), (CANVAS_W - 50, y_pos)], fill=ACCENT_COLOR, width=1)
-        cx = CANVAS_W // 2
-        draw.polygon([(cx, y_pos - 5), (cx + 5, y_pos), (cx, y_pos + 5), (cx - 5, y_pos)], fill=ACCENT_COLOR)
-
-    draw_sep(128)
-
-    # 3. Thumbnail Zone (y = 145 to 730)
-    thumb_zone_w, thumb_zone_h = 1000, 570
-    thumb_img = download_youtube_thumbnail(video_id, item.get("thumbnail_url", ""))
-
-    scale = min(thumb_zone_w / thumb_img.size[0], thumb_zone_h / thumb_img.size[1])
-    nw, nh = int(thumb_img.size[0] * scale), int(thumb_img.size[1] * scale)
-    thumb_resized = thumb_img.resize((nw, nh), Image.LANCZOS)
-
-    tx = (CANVAS_W - nw) // 2
-    ty = 145 + (thumb_zone_h - nh) // 2
-
-    # Draw gold border frame
-    draw.rectangle([tx - 4, ty - 4, tx + nw + 3, ty + nh + 3], outline=ACCENT_COLOR, width=2)
-    canvas.paste(thumb_resized, (tx, ty))
-
-    # 4. Title Zone (y = 740 to 990)
-    title_box_y = 740
-    title_box_h = 245
-    draw.rectangle([40, title_box_y, CANVAS_W - 40, title_box_y + title_box_h], fill=(16, 4, 4), outline=BORDER_COLOR, width=1)
-
-    # Wrap title
-    font_title = load_font(32, telugu=True, bold=True)
-    wrapped_lines = wrap_text_to_width(draw, title, font_title, max_width=940)[:3]
-
-    line_spacing = 56
-    start_ty = title_box_y + (title_box_h - (len(wrapped_lines) * line_spacing)) // 2 + 6
-    for idx, line in enumerate(wrapped_lines):
-        lb = draw.textbbox((0, 0), line, font=font_title)
-        lw = lb[2] - lb[0]
-        draw.text(((CANVAS_W - lw) // 2, start_ty + idx * line_spacing), line, font=font_title, fill=TEXT_WHITE)
-
-    draw_sep(1015)
-
-    # 5. Footer & QR Code Zone (y = 1030 to 1330)
-    foot_y = 1035
-    qr_img = generate_qr_code(yt_url, size=136)
-    qr_x = CANVAS_W - 60 - 136
-    canvas.paste(qr_img, (qr_x, foot_y + 8))
-    draw.rectangle([qr_x - 3, foot_y + 5, qr_x + 138, foot_y + 146], outline=ACCENT_COLOR, width=1)
-
-    font_qr_label = load_font(15, telugu=True, bold=False)
-    qr_lbl = "వీడియో చూడండి / Scan"
-    qlb = draw.textbbox((0, 0), qr_lbl, font=font_qr_label)
-    draw.text((qr_x + (136 - (qlb[2] - qlb[0])) // 2, foot_y + 152), qr_lbl, font=font_qr_label, fill=(215, 175, 75))
-
-    font_foot_head = load_font(24, telugu=True, bold=True)
-    font_contact   = load_font(24, telugu=False, bold=True)
-    font_wa_link   = load_font(22, telugu=False, bold=False)
-
-    draw.text((60, foot_y + 8), "వాస్తు & జ్యోతిష్య సలహాల కోసం సంప్రదించండి:", font=font_foot_head, fill=ACCENT_LIGHT)
-    draw.text((60, foot_y + 54), f"📞 {CONTACT_PHONE}  |  ✉️ {CONTACT_EMAIL}", font=font_contact, fill=TEXT_WHITE)
-    draw.text((60, foot_y + 98), f"💬 WhatsApp: {WHATSAPP_LINK}", font=font_wa_link, fill=ACCENT_COLOR)
-    draw.text((60, foot_y + 138), "🌐 సమర్థ వాస్తు — శాస్త్రీయ పరిష్కారాలు, సంపద, ఆరోగ్యం", font=load_font(20, telugu=True), fill=(200, 160, 60))
-
-    # Outer decorative border
-    draw.rectangle([10, 10, CANVAS_W - 10, CANVAS_H - 10], outline=BORDER_COLOR, width=2)
-    draw.rectangle([0, CANVAS_H - 6, CANVAS_W, CANVAS_H], fill=ACCENT_COLOR)
-
-    # Save high-res JPEG
-    canvas.save(output_path, "JPEG", quality=95, optimize=True)
-    log.info("Branded poster generated: %s (1080x1350)", output_path)
-    return str(output_path)
+    try:
+        from html_poster_generator import render_html_to_poster
+        return render_html_to_poster(item, str(output_path))
+    except Exception as exc:
+        log.warning("Headless Chrome poster failed: %s — falling back to plain placeholder.", exc)
+        # Minimal ASCII-only placeholder (zero Telugu PIL drawing)
+        canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), BG_COLOR)
+        draw = ImageDraw.Draw(canvas)
+        draw.rectangle([0, 0, CANVAS_W, 6], fill=ACCENT_COLOR)
+        draw.rectangle([0, CANVAS_H - 6, CANVAS_W, CANVAS_H], fill=ACCENT_COLOR)
+        draw.rectangle([10, 10, CANVAS_W - 10, CANVAS_H - 10], outline=BORDER_COLOR, width=2)
+        canvas.save(output_path, "JPEG", quality=95, optimize=True)
+        log.info("Placeholder poster saved: %s", output_path)
+        return str(output_path)
 
 
 # ── Smart YouTube Sync Orchestrator ──────────────────────────────────────────
