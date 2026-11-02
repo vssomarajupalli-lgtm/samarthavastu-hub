@@ -361,17 +361,19 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             browser = p.chromium.connect_over_cdp(CDP_URL, timeout=10000)
             context = browser.contexts[0]
 
-            log.info("[YouTube Shorts] Opening YouTube Studio: %s", STUDIO_URL)
+            # Use the direct YouTube Studio upload URL (opens file picker modal immediately)
+            upload_url = f"https://studio.youtube.com/channel/{TARGET_CHANNEL_ID}/videos/upload?d=ud"
+            log.info("[YouTube Shorts] Opening YouTube Studio upload: %s", upload_url)
             page = context.new_page()
-            page.goto(STUDIO_URL, timeout=25000)
-            page.wait_for_load_state("networkidle")
+            page.goto(upload_url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(8000)
 
             # Channel Verification & Account Switcher Guard
             current_url = page.url
             if DISALLOWED_CHANNEL in current_url or "@rajusvsn8246" in current_url:
                 log.warning("[YouTube Shorts] Opened on personal channel %s. Attempting account switch to %s...", DISALLOWED_CHANNEL, TARGET_CHANNEL_NAME)
                 try:
-                    avatar_btn = page.locator('#avatar-btn, button#avatar-btn').first
+                    avatar_btn = page.locator('button[aria-label="Create"], #avatar-btn, button#avatar-btn').first
                     avatar_btn.wait_for(state="visible", timeout=10000)
                     avatar_btn.click()
                     time.sleep(1.5)
@@ -394,26 +396,28 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             if DISALLOWED_CHANNEL in final_url or "@rajusvsn8246" in final_url:
                 raise RuntimeError(f"ABORTED: Connected to disallowed channel {DISALLOWED_CHANNEL} (@rajusvsn8246). Strictly prohibited from uploading to personal channel.")
 
-            # 1. Click CREATE button
-            create_btn = page.locator('button[aria-label="Create"], ytcp-button:has-text("Create")').first
-            create_btn.wait_for(state="visible", timeout=15000)
-            create_btn.click()
-            time.sleep(1.5)
+            # If not already on upload page (e.g. redirected to dashboard), click Create -> Upload videos
+            if "/videos/upload" not in page.url:
+                # 1. Click CREATE button
+                create_btn = page.locator('button[aria-label="Create"], ytcp-button:has-text("Create")').first
+                create_btn.wait_for(state="visible", timeout=15000)
+                create_btn.click()
+                time.sleep(1.5)
 
-            # 2. Click "Upload videos"
-            upload_item = page.locator('tp-yt-paper-item:has-text("Upload videos"), ytcp-text-menu-item:has-text("Upload videos")').first
-            upload_item.wait_for(state="visible", timeout=10000)
-            upload_item.click()
-            time.sleep(2)
+                # 2. Click "Upload videos"
+                upload_item = page.locator('tp-yt-paper-item:has-text("Upload videos"), ytcp-text-menu-item:has-text("Upload videos")').first
+                upload_item.wait_for(state="visible", timeout=10000)
+                upload_item.click()
+                time.sleep(2)
 
             # 3. Supply MP4 to input[type="file"]
-            file_input = page.locator('input[type="file"]')
+            file_input = page.locator('input[type="file"]').first
             file_input.wait_for(state="attached", timeout=10000)
             log.info("[YouTube Shorts] Uploading file %s...", mp4_path)
             file_input.set_input_files(str(mp4_path.resolve()))
 
             # 4. Wait for metadata form
-            title_box = page.locator('#title-textarea #textbox').first
+            title_box = page.locator('#title-textarea #textbox, #textarea-container #textbox').first
             title_box.wait_for(state="visible", timeout=30000)
             time.sleep(2)
 
@@ -426,7 +430,7 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             log.info("[YouTube Shorts] Title filled successfully.")
 
             # Set description
-            desc_box = page.locator('#description-textarea #textbox').first
+            desc_box = page.locator('#description-textarea #textbox, #description-container #textbox').first
             if desc_box.is_visible():
                 desc_box.click()
                 desc_box.fill(short_desc)
@@ -439,13 +443,9 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             log.info("[YouTube Shorts] Selected 'Not made for kids'.")
             time.sleep(1)
 
-            # Wait a few seconds to extract short link
-            time.sleep(4)
-            for link in page.locator('a').all():
-                href = link.get_attribute("href") or ""
-                if "youtube.com/shorts/" in href or "youtu.be/" in href:
-                    short_url = href.strip()
-                    break
+            # Wait for short URL to appear after upload processing
+            time.sleep(5)
+            short_url = _extract_short_url(page)
 
             # 5. Navigate through Next steps (Details -> Video elements -> Checks -> Visibility)
             next_btn = page.locator('#next-button').first
@@ -464,11 +464,7 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
 
             # If short_url not captured yet, check again on Visibility screen
             if not short_url:
-                for link in page.locator('a').all():
-                    href = link.get_attribute("href") or ""
-                    if "youtube.com/shorts/" in href or "youtu.be/" in href:
-                        short_url = href.strip()
-                        break
+                short_url = _extract_short_url(page)
 
             # 7. Click Publish ("#done-button")
             done_btn = page.locator('#done-button').first
@@ -479,11 +475,7 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
 
             # Look for post-publish dialog short link if still not found
             if not short_url:
-                for link in page.locator('a').all():
-                    href = link.get_attribute("href") or ""
-                    if "youtube.com/shorts/" in href or "youtu.be/" in href:
-                        short_url = href.strip()
-                        break
+                short_url = _extract_short_url(page)
 
             # Fallback format if youtu.be was returned
             if short_url and "youtu.be/" in short_url:
@@ -502,6 +494,26 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
 
     log.info("[YouTube Shorts] Upload complete! Short URL: %s", short_url)
     return {"success": True, "short_url": short_url}
+
+
+def _extract_short_url(page) -> str | None:
+    """Extract a verified youtube.com/shorts/<11-char-id> URL from the current page."""
+    try:
+        for link in page.locator('a').all():
+            href = link.get_attribute("href") or ""
+            if "youtube.com/shorts/" in href or "youtu.be/" in href:
+                url = href.strip()
+                if "youtu.be/" in url:
+                    vid_part = url.split("youtu.be/")[-1].split("?")[0]
+                    url = f"https://www.youtube.com/shorts/{vid_part}"
+                # Verify it's an 11-char short ID
+                import re
+                m = re.search(r'/shorts/([a-zA-Z0-9_-]{11})', url)
+                if m:
+                    return url
+    except Exception:
+        pass
+    return None
 
 
 def upload_short_via_gui(item: dict, mp4_path: Path, short_title: str, short_desc: str) -> dict:

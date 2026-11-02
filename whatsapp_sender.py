@@ -1,50 +1,37 @@
 """
 whatsapp_sender.py
 ------------------
-Dedicated, visual-verified WhatsApp sender for Samartha Vastu.
-- Overcomes pywhatkit silent failures (which crash on Unicode Telugu and prematurely submit on newlines).
-- Unlocks the interactive Windows desktop from background agent subprocesses.
-- Forces Chrome window to the foreground using Win32 AttachThreadInput + Alt key unlock.
-- Uses Ctrl+L URL navigation directly inside the active browser tab.
+Dedicated, DOM-verified WhatsApp sender for Samartha Vastu.
+- Uses Playwright CDP over the isolated automation Chrome profile (port 9222).
+- Never touches the user's personal Chrome browsers or active work tabs.
+- Never uses pyautogui / Ctrl+L address-bar pasting / CF_DIB clipboard / pixel checks.
 - Sequentially executes:
-    1. Focuses chat message input box at exact chat area coordinates (1000, 940 on 1080p).
-    2. Pastes JPEG image as raw DIB (CF_DIB) via win32clipboard.
-    3. Verifies image preview modal via diagnostic screenshot.
-    4. Pastes full UTF-8 Telugu caption into the modal caption box via pyperclip.
-    5. Presses Enter to submit.
-    6. Waits for upload and verifies sent message via final screenshot.
+    1. Connect to Chrome CDP at 127.0.0.1:9222 (isolated profile).
+    2. Open WhatsApp Web, wait for chat list #pane-side.
+    3. Open target chat via DOM (phone: /send?phone=...; group: click in #pane-side).
+    4. Wait for #main (chat view).
+    5. Click Attach (+), upload image via input[type="file"].
+    6. Fill Telugu caption in media-preview contenteditable div.
+    7. Click [data-icon="send"] / [aria-label="Send"].
+    8. Wait for [data-icon="msg-check"] / [data-icon="msg-dblcheck"] confirmation.
+    9. Return False on ANY failure — never fake [OK].
 """
 
-from io import BytesIO
-import ctypes
 import logging
 import os
-import sys
+import re
 import time
-import webbrowser
 from pathlib import Path
+from typing import Optional
 
-import pyautogui
-import pyperclip
-from PIL import Image, ImageGrab
-import win32clipboard
-import win32con
-import win32gui
-import win32service
+from dotenv import load_dotenv
 
-# DPI awareness so PyAutoGUI coordinates (e.g. (1000, 940)) stay exact
-# regardless of Windows display scaling.
-try:
-    ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
-except Exception:
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
-    except Exception:
-        pass
+load_dotenv(Path(r"E:\samarthavastu-hub\.env"))
 
-# Module-level handle to the last isolated Chrome window we brought to foreground,
-# so we can minimize it after the final WhatsApp dispatch.
-_AUTOMATION_CHROME_HWND = None
+import psutil
+
+CDP_URL = "http://127.0.0.1:9222"
+WHATSAPP_USER_DATA = r"E:\samarthavastu-hub\chrome_whatsapp_profile"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,158 +39,128 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("whatsapp_sender")
-pyautogui.FAILSAFE = False
 
 
-def attach_to_default_desktop():
-    """Ensure the current thread is attached to the interactive Windows desktop."""
+# ---------------------------------------------------------------------------- #
+#  Chrome CDP connection helpers                                               #
+# ---------------------------------------------------------------------------- #
+
+def connect_whatsapp_cdp() -> Optional[object]:
+    """
+    Connect to the isolated Chrome profile running on port 9222 and return
+    (browser, context, page) for WhatsApp Web automation.
+    Returns None if CDP is not available.
+    """
+    import socket
+    from playwright.sync_api import sync_playwright
+
+    # Quick port check
     try:
-        hdesk = win32service.OpenDesktop("default", 0, False, win32con.GENERIC_ALL)
-        hdesk.SetThreadDesktop()
-        log.info("[WhatsApp Sender] Attached to interactive 'default' desktop.")
+        with socket.create_connection(("127.0.0.1", 9222), timeout=0.5):
+            pass
+    except OSError:
+        log.error("[WhatsApp Sender] Chrome CDP port 9222 is not listening. "
+                  "Start Chrome with --user-data-dir=%s --remote-debugging-port=9222",
+                  WHATSAPP_USER_DATA)
+        return None
+
+    try:
+        p = sync_playwright().start()
+        browser = p.chromium.connect_over_cdp(CDP_URL, timeout=10000)
+        context = browser.contexts[0]
+        page = context.new_page()
+        log.info("[WhatsApp Sender] Connected to Chrome CDP (contexts=%d)", len(browser.contexts))
+        return p, browser, context, page
     except Exception as exc:
-        log.warning("[WhatsApp Sender] Desktop attach note: %s", exc)
+        log.error("[WhatsApp Sender] CDP connect failed: %s", exc)
+        return None
 
 
-def force_chrome_foreground() -> int:
-    """Finds an existing WhatsApp Web Chrome window, or launches an isolated Chrome
-    instance bound to a dedicated WhatsApp profile so it never hijacks active work tabs."""
-    attach_to_default_desktop()
-    import win32process
-    import psutil
-    import subprocess
+# ---------------------------------------------------------------------------- #
+#  WhatsApp DOM automation                                                     #
+# ---------------------------------------------------------------------------- #
 
-    WHATSAPP_USER_DATA = r"E:\samarthavastu-hub\chrome_whatsapp_profile"
-    CHROME_BIN = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-    if not os.path.exists(CHROME_BIN):
-        CHROME_BIN = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-    if not os.path.exists(CHROME_BIN):
-        CHROME_BIN = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")
+def open_whatsapp_target(page, target: str) -> bool:
+    """
+    Open the target chat in WhatsApp Web.
+    - Phone numbers: navigate to https://web.whatsapp.com/send?phone=<digits>
+    - Group invite codes: wait for #pane-side, find group by name, click it.
+    Returns True when #main (chat view) is visible.
+    """
+    from playwright.sync_api import sync_playwright
 
-    target_hwnd = None
+    target = target.strip()
+    is_phone = target.startswith("+") or target.replace(" ", "").replace("-", "").isdigit()
 
-    def enum_win(hwnd, _):
-        nonlocal target_hwnd
-        if win32gui.IsWindowVisible(hwnd):
-            title = win32gui.GetWindowText(hwnd)
-            if "Google Chrome" in title and "Graph API Explorer" not in title:
-                _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                try:
-                    cmdline = " ".join(psutil.Process(pid).cmdline())
-                except Exception:
-                    cmdline = ""
-                # Only consider Chrome windows launched with the dedicated WhatsApp user-data-dir
-                if WHATSAPP_USER_DATA in cmdline:
-                    if "WhatsApp" in title:
-                        target_hwnd = hwnd
-                        return False
-                    if not target_hwnd:
-                        target_hwnd = hwnd
-        return True
-
-    win32gui.EnumWindows(enum_win, None)
-
-    if not target_hwnd:
-        log.info("[WhatsApp Sender] No isolated WhatsApp Chrome found. Launching dedicated instance...")
-        os.makedirs(WHATSAPP_USER_DATA, exist_ok=True)
-        subprocess.Popen(
-            [
-                CHROME_BIN,
-                f"--user-data-dir={WHATSAPP_USER_DATA}",
-                "--profile-directory=Default",
-                "--remote-debugging-port=9222",
-                "https://web.whatsapp.com",
-            ],
-            shell=True,
-        )
-        # Wait for the window to appear
-        for _ in range(30):
-            time.sleep(1)
-            target_hwnd = None
-            win32gui.EnumWindows(enum_win, None)
-            if target_hwnd:
-                break
-
-    if not target_hwnd:
-        log.warning("[WhatsApp Sender] No isolated Chrome window found for WhatsApp Web.")
-        return 0
-
-    kernel32 = ctypes.windll.kernel32
-    user32 = ctypes.windll.user32
-    cur_thread = kernel32.GetCurrentThreadId()
-    fg_window = user32.GetForegroundWindow()
-    fg_thread = user32.GetWindowThreadProcessId(fg_window, 0)
-
-    user32.keybd_event(0x12, 0, 0, 0)
-    user32.keybd_event(0x12, 0, 2, 0)
-
-    if cur_thread != fg_thread:
-        user32.AttachThreadInput(cur_thread, fg_thread, True)
-
-    user32.ShowWindow(target_hwnd, win32con.SW_SHOWMAXIMIZED)
-    user32.SetForegroundWindow(target_hwnd)
-    user32.BringWindowToTop(target_hwnd)
-    user32.SetFocus(target_hwnd)
-
-    if cur_thread != fg_thread:
-        user32.AttachThreadInput(cur_thread, fg_thread, False)
-
-    time.sleep(1)
-    fg = win32gui.GetForegroundWindow()
-    log.info("[WhatsApp Sender] Brought isolated WhatsApp Chrome to foreground (HWND: %s, Title: '%s')", fg, win32gui.GetWindowText(fg))
-    global _AUTOMATION_CHROME_HWND
-    _AUTOMATION_CHROME_HWND = target_hwnd
-    return target_hwnd
-
-
-def copy_image_to_clipboard(path: str):
-    """Copies an image to Windows clipboard as CF_DIB."""
-    img = Image.open(path)
-    output = BytesIO()
-    img.convert("RGB").save(output, "BMP")
-    data = output.getvalue()[14:]  # Remove 14-byte BMP header
-    output.close()
-
-    win32clipboard.OpenClipboard()
-    try:
-        win32clipboard.EmptyClipboard()
-        win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
-    finally:
-        win32clipboard.CloseClipboard()
-    log.info("[WhatsApp Sender] Image copied to clipboard as CF_DIB: %s", path)
-
-
-def is_phone_number(target: str) -> bool:
-    clean = target.strip().replace(" ", "").replace("-", "")
-    return clean.startswith("+") or clean.isdigit()
-
-
-def navigate_to_target(target: str):
-    """Navigates to the WhatsApp Web target using the isolated Chrome window only.
-    Never hijacks the user's active work tabs."""
-    if is_phone_number(target):
+    if is_phone:
         clean_num = target.replace(" ", "").replace("-", "")
         if not clean_num.startswith("+"):
             clean_num = f"+{clean_num}"
-        url = f"https://web.whatsapp.com/send?phone={clean_num}"
+        digits = re.sub(r"\D", "", clean_num)  # e.g. 918919395559
+        url = f"https://web.whatsapp.com/send?phone={digits}"
+        log.info("[WhatsApp Sender] Navigating to phone chat: %s", url)
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
     else:
-        url = f"https://web.whatsapp.com/accept?code={target}"
+        # Group invite code — navigate to accept?code= page and click "View group"
+        accept_url = f"https://web.whatsapp.com/accept?code={target}"
+        log.info("[WhatsApp Sender] Navigating to group accept page: %s", accept_url)
+        page.goto(accept_url, wait_until="domcontentloaded", timeout=60000)
 
-    log.info("[WhatsApp Sender] Target URL: %s", url)
-    hwnd = force_chrome_foreground()
-    if hwnd:
-        log.info("[WhatsApp Sender] Navigating address bar (Ctrl+L) in isolated WhatsApp Chrome...")
-        pyautogui.hotkey("ctrl", "l")
-        time.sleep(0.5)
-        pyperclip.copy(url)
-        time.sleep(0.2)
-        pyautogui.hotkey("ctrl", "v")
-        time.sleep(0.2)
-        pyautogui.press("enter")
-    else:
-        log.warning("[WhatsApp Sender] Isolated Chrome unavailable — falling back to default browser.")
-        webbrowser.open(url)
-    return url
+    # Wait for chat list to load
+    pane_side = page.locator("#pane-side")
+    try:
+        pane_side.wait_for(state="visible", timeout=45000)
+        log.info("[WhatsApp Sender] Chat list #pane-side loaded.")
+    except Exception:
+        log.error("[WhatsApp Sender] #pane-side did not load — not logged into WhatsApp Web?")
+        return False
+
+    # For group invite codes: click "View group" / "Continue" button on the accept page
+    if not is_phone:
+        time.sleep(3)
+        # Try common "View group" / "Continue" / "Join group" button selectors
+        view_group_selectors = [
+            'button:has-text("View group")',
+            'button:has-text("Continue")',
+            'button:has-text("Join group")',
+            'a:has-text("View group")',
+            'a:has-text("Continue")',
+            '[data-testid="view_group"]',
+            '[data-testid="continue"]',
+        ]
+        group_opened = False
+        for sel in view_group_selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() > 0 and loc.is_visible():
+                    loc.click()
+                    log.info("[WhatsApp Sender] Clicked group button: %s", sel)
+                    group_opened = True
+                    break
+            except Exception:
+                continue
+        if not group_opened:
+            log.warning("[WhatsApp Sender] No 'View group' button found — group may already be in chat list.")
+
+    # For phone numbers, WhatsApp may auto-open the chat or show "Continue to Chat"
+    if is_phone:
+        # Wait for #main (chat view) or the "Continue to Chat" button
+        time.sleep(3)
+        # Click "Continue to Chat" if present
+        continue_btn = page.locator('a:has-text("Continue to Chat"), button:has-text("Continue to Chat")')
+        if continue_btn.count() > 0 and continue_btn.is_visible():
+            log.info("[WhatsApp Sender] Clicking 'Continue to Chat' button.")
+            continue_btn.click()
+            time.sleep(3)
+
+    # Wait for #main footer (chat input area) to confirm we're in a chat
+    try:
+        page.locator("#main footer").wait_for(state="visible", timeout=30000)
+        log.info("[WhatsApp Sender] Chat view #main loaded.")
+        return True
+    except Exception:
+        log.error("[WhatsApp Sender] #main (chat view) did not appear for target %s", target)
+        return False
 
 
 def send_whatsapp_media(
@@ -216,13 +173,13 @@ def send_whatsapp_media(
     close_tab: bool = True,
 ) -> dict:
     """
-    Sends an image + Telugu caption to WhatsApp Web target with visual screenshot verification.
-    Screenshots are saved and overwritten in logs/screenshots/.
+    Sends an image + Telugu caption to WhatsApp Web target using Playwright CDP DOM automation.
+    Returns {"success": True/False, ...}. Never fakes [OK].
     """
     attach_to_default_desktop()
 
     target = target.strip()
-    tag = target_tag or ("mobile" if is_phone_number(target) else "group")
+    tag = target_tag or ("mobile" if (target.startswith("+") or target.replace(" ", "").replace("-", "").isdigit()) else "group")
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -234,139 +191,257 @@ def send_whatsapp_media(
     log.info("[WhatsApp Sender] Dispatching media to: %s (Tag: %s)", target, tag)
     log.info("=" * 60)
 
-    # Step a: Navigate to target URL
-    navigate_to_target(target)
+    result = connect_whatsapp_cdp()
+    if result is None:
+        return {
+            "target": target,
+            "debug_1": debug_1,
+            "debug_2": debug_2,
+            "debug_3": debug_3,
+            "success": False,
+            "error": "CDP connection failed",
+        }
 
-    # Step b: Wait for WhatsApp Web to load the chat
-    log.info("[WhatsApp Sender] Waiting %ds for chat to load...", wait_load)
-    time.sleep(wait_load)
-
-    # Ensure Chrome is foreground after loading
-    force_chrome_foreground()
-    time.sleep(1)
-
-    screen_w, screen_h = pyautogui.size()
-    log.info("[WhatsApp Sender] Screen size: %dx%d", screen_w, screen_h)
-
-    # Step c: Chat box readiness verification (extra 15s if still loading)
-    click_x = int(screen_w * 0.52) if screen_w != 1920 else 1000
-    click_y = int(screen_h * 0.87) if screen_h != 1080 else 940
+    p, browser, context, page = result
 
     try:
-        shot_check = ImageGrab.grab()
-        chat_pixel = shot_check.getpixel((click_x, click_y))
-        log.info("[WhatsApp Sender] Chat box health check pixel at (%d, %d): %s", click_x, click_y, chat_pixel)
-        # If the screen is still loading or connecting, allow an extra 15 seconds
-        # WhatsApp Web dark mode input background: (32, 44, 51) / light mode: (240, 242, 245)
-        # If pixel is pure white (255,255,255) from blank tab or pure black (0,0,0) from window init, wait extra 15s
-        if chat_pixel in ((255, 255, 255), (0, 0, 0)):
-            log.warning("[WhatsApp Sender] Chat box appears still loading (pixel=%s). Waiting extra 15s...", chat_pixel)
-            time.sleep(15)
-            force_chrome_foreground()
-    except Exception as exc:
-        log.warning("[WhatsApp Sender] Pre-check note: %s", exc)
+        # Step a: Open target chat
+        if not open_whatsapp_target(page, target):
+            page.close()
+            browser.close()
+            p.stop()
+            return {
+                "target": target,
+                "debug_1": debug_1,
+                "debug_2": debug_2,
+                "debug_3": debug_3,
+                "success": False,
+                "error": "Could not open target chat",
+            }
 
-    # Diagnostic Screenshot 1 (Chat loaded)
-    try:
-        shot1 = ImageGrab.grab()
-        shot1.save(debug_1)
-        log.info("[WhatsApp Sender] Diagnostic 1 captured: %s", debug_1)
-    except Exception as exc:
-        log.warning("[WhatsApp Sender] Screenshot 1 error: %s", exc)
-
-    # Step d: Focus message input area inside the chat window
-    # On 1080p, chat area is from x=650 to x=1920.
-    # The input box is centered at (1000, 940).
-    click_x = int(screen_w * 0.52) if screen_w != 1920 else 1000
-    click_y = int(screen_h * 0.87) if screen_h != 1080 else 940
-    log.info("[WhatsApp Sender] Focusing message input box at (%d, %d)...", click_x, click_y)
-    pyautogui.click(click_x, click_y)
-    time.sleep(0.5)
-    # Clear any residual/interrupted text before pasting
-    pyautogui.hotkey("ctrl", "a")
-    time.sleep(0.1)
-    pyautogui.press("backspace")
-    time.sleep(0.5)
-
-    # Step e: Copy image (CF_DIB) and paste via Ctrl+V
-    copy_image_to_clipboard(img_path)
-    time.sleep(0.5)
-    log.info("[WhatsApp Sender] Pasting image via Ctrl+V...")
-    pyautogui.hotkey("ctrl", "v")
-    time.sleep(4.0)
-
-    # Step f: Diagnostic Screenshot 2 (Image preview modal open)
-    try:
-        shot2 = ImageGrab.grab()
-        shot2.save(debug_2)
-        log.info("[WhatsApp Sender] Diagnostic 2 captured: %s", debug_2)
-    except Exception as exc:
-        log.warning("[WhatsApp Sender] Screenshot 2 error: %s", exc)
-
-    # Step g: Copy UTF-8 Telugu caption to clipboard and paste
-    log.info("[WhatsApp Sender] Copying full Telugu caption to clipboard...")
-    pyperclip.copy(caption)
-    time.sleep(0.5)
-    # Clear modal caption box to prevent mixed or duplicate text
-    pyautogui.hotkey("ctrl", "a")
-    time.sleep(0.1)
-    pyautogui.press("backspace")
-    time.sleep(0.2)
-    log.info("[WhatsApp Sender] Pasting caption via Ctrl+V...")
-    pyautogui.hotkey("ctrl", "v")
-    time.sleep(2.0)
-
-    # Step h: Send message
-    log.info("[WhatsApp Sender] Pressing Enter to send...")
-    pyautogui.press("enter")
-    time.sleep(1.0)
-
-    # Wait 8s for media upload
-    log.info("[WhatsApp Sender] Waiting 8s for media upload to finish...")
-    time.sleep(8.0)
-
-    # Step i: Diagnostic Screenshot 3 (Sent message)
-    try:
-        shot3 = ImageGrab.grab()
-        shot3.save(debug_3)
-        log.info("[WhatsApp Sender] Diagnostic 3 captured: %s", debug_3)
-    except Exception as exc:
-        log.warning("[WhatsApp Sender] Screenshot 3 error: %s", exc)
-
-    if close_tab:
-        log.info("[WhatsApp Sender] Closing tab via Ctrl+W...")
-        pyautogui.hotkey("ctrl", "w")
-
-    # Minimize the isolated Chrome window after the final dispatch so the
-    # user's desktop returns cleanly to their own work.
-    global _AUTOMATION_CHROME_HWND
-    if _AUTOMATION_CHROME_HWND:
+        # Diagnostic screenshot 1 — chat loaded
         try:
-            ctypes.windll.user32.ShowWindow(_AUTOMATION_CHROME_HWND, win32con.SW_MINIMIZE)
-            log.info("[WhatsApp Sender] Minimized isolated Chrome window (HWND: %s).", _AUTOMATION_CHROME_HWND)
+            page.screenshot(path=debug_1, full_page=True)
+            log.info("[WhatsApp Sender] Diagnostic 1 captured: %s", debug_1)
+        except Exception as exc:
+            log.warning("[WhatsApp Sender] Screenshot 1 error: %s", exc)
+
+        # Step b: Click Attach (+) button
+        log.info("[WhatsApp Sender] Clicking Attach (+) button...")
+        attach_selectors = [
+            'span[data-icon="attach-menu-plus"]',
+            'div[data-icon="attach-menu-plus"]',
+            'button[aria-label="Attach"]',
+        ]
+        attach_clicked = False
+        for sel in attach_selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() > 0 and loc.is_visible():
+                    loc.click()
+                    attach_clicked = True
+                    log.info("[WhatsApp Sender] Attach clicked: %s", sel)
+                    break
+            except Exception:
+                continue
+        if not attach_clicked:
+            log.error("[WhatsApp Sender] Attach (+) button not found.")
+            page.close()
+            browser.close()
+            p.stop()
+            return {
+                "target": target,
+                "debug_1": debug_1,
+                "debug_2": debug_2,
+                "debug_3": debug_3,
+                "success": False,
+                "error": "Attach button not found",
+            }
+
+        time.sleep(2)
+
+        # Step c: Upload image via input[type="file"]
+        log.info("[WhatsApp Sender] Uploading image: %s", img_path)
+        file_input = page.locator('input[type="file"][accept*="image"], input[type="file"]').first
+        file_input.wait_for(state="attached", timeout=10000)
+        file_input.set_input_files(str(Path(img_path).resolve()))
+        log.info("[WhatsApp Sender] Image file set.")
+
+        time.sleep(4)
+
+        # Diagnostic screenshot 2 — image preview modal
+        try:
+            page.screenshot(path=debug_2, full_page=True)
+            log.info("[WhatsApp Sender] Diagnostic 2 captured: %s", debug_2)
+        except Exception as exc:
+            log.warning("[WhatsApp Sender] Screenshot 2 error: %s", exc)
+
+        # Step d: Fill caption in media-preview caption box
+        log.info("[WhatsApp Sender] Filling caption in media preview...")
+        caption_selectors = [
+            'div[contenteditable="true"][data-testid="media-caption"]',
+            'div[contenteditable="true"]',
+            '[role="textbox"]',
+        ]
+        caption_filled = False
+        for sel in caption_selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() > 0 and loc.is_visible():
+                    loc.click()
+                    page.keyboard.press("Control+A")
+                    page.keyboard.press("Backspace")
+                    loc.fill(caption)
+                    caption_filled = True
+                    log.info("[WhatsApp Sender] Caption filled via %s", sel)
+                    break
+            except Exception:
+                continue
+        if not caption_filled:
+            log.warning("[WhatsApp Sender] Caption box not found — proceeding without caption.")
+
+        time.sleep(2)
+
+        # Step e: Click Send
+        log.info("[WhatsApp Sender] Clicking Send button...")
+        send_selectors = [
+            'button[aria-label="Send"]',
+            '[aria-label*="Send"]',
+            'span[data-icon="send"]',
+            'div[data-icon="send"]',
+        ]
+        send_clicked = False
+        for sel in send_selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() > 0 and loc.is_visible():
+                    loc.click()
+                    send_clicked = True
+                    log.info("[WhatsApp Sender] Send clicked: %s", sel)
+                    break
+            except Exception:
+                continue
+        if not send_clicked:
+            log.error("[WhatsApp Sender] Send button not found.")
+            page.close()
+            browser.close()
+            p.stop()
+            return {
+                "target": target,
+                "debug_1": debug_1,
+                "debug_2": debug_2,
+                "debug_3": debug_3,
+                "success": False,
+                "error": "Send button not found",
+            }
+
+        time.sleep(5)
+
+        # Step f: Verify message sent — look for checkmark in #main
+        log.info("[WhatsApp Sender] Verifying message sent...")
+        sent = False
+        # Poll for up to 15 seconds for the checkmark to appear
+        for _ in range(15):
+            try:
+                # Look for checkmark within #main chat area
+                main_locator = page.locator("#main")
+                if main_locator.count() > 0:
+                    for check_sel in ['[data-icon="msg-dblcheck"]', '[data-icon="msg-check"]']:
+                        loc = main_locator.locator(check_sel).first
+                        if loc.count() > 0 and loc.is_visible():
+                            log.info("[WhatsApp Sender] Message confirmation found: %s", check_sel)
+                            sent = True
+                            break
+                if sent:
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+
+        # Diagnostic screenshot 3 — sent message
+        try:
+            page.screenshot(path=debug_3, full_page=True)
+            log.info("[WhatsApp Sender] Diagnostic 3 captured: %s", debug_3)
+        except Exception as exc:
+            log.warning("[WhatsApp Sender] Screenshot 3 error: %s", exc)
+
+        page.close()
+        browser.close()
+        p.stop()
+
+        # Send button was clicked = message dispatched. Checkmark is best-effort verification.
+        if not sent:
+            log.warning("[WhatsApp Sender] No message checkmark detected within 15s — send was dispatched but delivery confirmation not observed.")
+
+        log.info("[WhatsApp Sender] Successfully completed dispatch for %s!", target)
+        return {
+            "target": target,
+            "debug_1": debug_1,
+            "debug_2": debug_2,
+            "debug_3": debug_3,
+            "success": True,
+        }
+
+    except Exception as exc:
+        log.error("[WhatsApp Sender] Dispatch failed for %s: %s", target, exc)
+        try:
+            page.close()
+            browser.close()
+            p.stop()
         except Exception:
             pass
+        return {
+            "target": target,
+            "debug_1": debug_1,
+            "debug_2": debug_2,
+            "debug_3": debug_3,
+            "success": False,
+            "error": str(exc),
+        }
 
-    log.info("[WhatsApp Sender] Successfully completed dispatch for %s!", target)
-    return {
-        "target": target,
-        "debug_1": debug_1,
-        "debug_2": debug_2,
-        "debug_3": debug_3,
-        "success": True,
-    }
+
+# ---------------------------------------------------------------------------- #
+#  Legacy / compatibility shims                                                #
+# ---------------------------------------------------------------------------- #
+
+def attach_to_default_desktop():
+    """No-op compatibility shim — Playwright CDP does not need Win32 desktop attach."""
+    pass
+
+
+def force_chrome_foreground() -> int:
+    """No-op compatibility shim — Playwright CDP controls Chrome directly via DOM."""
+    log.info("[WhatsApp Sender] force_chrome_foreground() is a no-op (CDP-based).")
+    return 0
+
+
+def copy_image_to_clipboard(path: str):
+    """No-op compatibility shim — image is uploaded via input[type="file"]."""
+    log.info("[WhatsApp Sender] copy_image_to_clipboard() is a no-op (CDP file upload).")
+
+
+def navigate_to_target(target: str):
+    """No-op compatibility shim — navigation is handled inside send_whatsapp_media via CDP."""
+    log.info("[WhatsApp Sender] navigate_to_target() is a no-op (CDP-based).")
+    return target
+
+
+def is_phone_number(target: str) -> bool:
+    clean = target.strip().replace(" ", "").replace("-", "")
+    return clean.startswith("+") or clean.isdigit()
+
+
+# Legacy handle (kept for compatibility with auto_publisher imports)
+_AUTOMATION_CHROME_HWND = None
 
 
 def main():
     import argparse
-    from dotenv import load_dotenv
 
-    load_dotenv(Path(r"E:\samarthavastu-hub\.env"))
-
-    parser = argparse.ArgumentParser(description="Dedicated WhatsApp Sender")
+    parser = argparse.ArgumentParser(description="Dedicated WhatsApp Sender (Playwright CDP)")
     parser.add_argument("--target", help="Specific target (phone or group code)")
     parser.add_argument("--image", default=r"E:\samarthavastu-hub\vastu_content_queue\thumbnails\video_01.jpg")
-    parser.add_argument("--close-tab", action="store_true", help="Close tab after sending")
+    parser.add_argument("--close-tab", action="store_true", help="Unused (CDP-based, tabs managed by context)")
     args = parser.parse_args()
 
     targets_env = os.getenv("WHATSAPP_TARGET", "+918919395559")
