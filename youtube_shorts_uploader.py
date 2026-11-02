@@ -29,6 +29,7 @@ SCHEDULE_FILE   = QUEUE_DIR / "master_schedule.json"
 LOGS_DIR        = BASE_DIR / "logs"
 TEMP_MP4        = LOGS_DIR / "temp_short.mp4"
 TEMP_FRAME      = LOGS_DIR / "temp_short_frame.jpg"
+OUT_DIR         = LOGS_DIR / "screenshots"
 
 CDP_URL             = os.getenv("CHROME_CDP_URL", "http://127.0.0.1:9222")
 TARGET_CHANNEL_ID   = "UCDtcb0drjmLgG3ARTh4e7jw"
@@ -192,6 +193,7 @@ def create_shorts_video(poster_path: str | Path, output_mp4: str | Path = TEMP_M
         raise FileNotFoundError(f"Poster image not found: {poster_path}")
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     output_mp4 = Path(output_mp4)
 
     poster = Image.open(poster_path).convert("RGB")
@@ -361,126 +363,139 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             browser = p.chromium.connect_over_cdp(CDP_URL, timeout=10000)
             context = browser.contexts[0]
 
-            # Use the direct YouTube Studio upload URL (opens file picker modal immediately)
-            upload_url = f"https://studio.youtube.com/channel/{TARGET_CHANNEL_ID}/videos/upload?d=ud"
-            log.info("[YouTube Shorts] Opening YouTube Studio upload: %s", upload_url)
+            # ── Step 1: Open existing draft or start new upload ───────────────
+            drafts_url = f"https://studio.youtube.com/channel/{TARGET_CHANNEL_ID}/videos/short"
+            log.info("[YouTube Shorts] Opening YouTube Shorts drafts page: %s", drafts_url)
             page = context.new_page()
-            page.goto(upload_url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(8000)
+            page.goto(drafts_url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(6000)
 
-            # Channel Verification & Account Switcher Guard
+            # Channel guard
             current_url = page.url
             if DISALLOWED_CHANNEL in current_url or "@rajusvsn8246" in current_url:
-                log.warning("[YouTube Shorts] Opened on personal channel %s. Attempting account switch to %s...", DISALLOWED_CHANNEL, TARGET_CHANNEL_NAME)
-                try:
-                    avatar_btn = page.locator('button[aria-label="Create"], #avatar-btn, button#avatar-btn').first
-                    avatar_btn.wait_for(state="visible", timeout=10000)
-                    avatar_btn.click()
-                    time.sleep(1.5)
+                raise RuntimeError(f"ABORTED: Connected to disallowed channel {DISALLOWED_CHANNEL} (@rajusvsn8246).")
 
-                    switch_item = page.locator('tp-yt-paper-item:has-text("Switch account"), ytcp-text-menu-item:has-text("Switch account")').first
-                    switch_item.wait_for(state="visible", timeout=8000)
-                    switch_item.click()
-                    time.sleep(2)
+            # Try to find and click "Edit draft" for this video's title
+            draft_title = item.get("title", "")
+            edit_clicked = False
+            try:
+                # Find row containing the draft title
+                row = page.locator(f'tr:has-text("{draft_title[:40]}"), ytcp-video-row:has-text("{draft_title[:40]}")').first
+                if row.count() > 0 and row.is_visible():
+                    edit_btn = row.locator('[aria-label="Edit draft"], ytcp-button:has-text("Edit draft"), button:has-text("Edit draft")').first
+                    if edit_btn.count() > 0 and edit_btn.is_visible():
+                        edit_btn.click()
+                        log.info("[YouTube Shorts] Clicked 'Edit draft' for existing draft.")
+                        edit_clicked = True
+            except Exception as exc:
+                log.info("[YouTube Shorts] No existing draft found to edit: %s", exc)
 
-                    target_channel_btn = page.locator(f'ytd-account-item-renderer:has-text("{TARGET_CHANNEL_NAME}"), tp-yt-paper-item:has-text("{TARGET_CHANNEL_NAME}"), #channel-title:has-text("{TARGET_CHANNEL_NAME}")').first
-                    target_channel_btn.wait_for(state="visible", timeout=8000)
-                    target_channel_btn.click()
-                    time.sleep(5)
-                    page.wait_for_load_state("networkidle")
-                except Exception as sw_err:
-                    log.error("[YouTube Shorts] Account switch failed: %s", sw_err)
+            if not edit_clicked:
+                # Start new upload via direct upload URL
+                upload_url = f"https://studio.youtube.com/channel/{TARGET_CHANNEL_ID}/videos/upload?d=ud"
+                log.info("[YouTube Shorts] Opening direct upload URL: %s", upload_url)
+                page.goto(upload_url, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(6000)
 
-            # Strict guard check: NEVER upload to personal channel
-            final_url = page.url
-            if DISALLOWED_CHANNEL in final_url or "@rajusvsn8246" in final_url:
-                raise RuntimeError(f"ABORTED: Connected to disallowed channel {DISALLOWED_CHANNEL} (@rajusvsn8246). Strictly prohibited from uploading to personal channel.")
+                # 3. Supply MP4 to input[type="file"]
+                file_input = page.locator('input[type="file"]').first
+                file_input.wait_for(state="attached", timeout=10000)
+                log.info("[YouTube Shorts] Uploading file %s...", mp4_path)
+                file_input.set_input_files(str(mp4_path.resolve()))
 
-            # If not already on upload page (e.g. redirected to dashboard), click Create -> Upload videos
-            if "/videos/upload" not in page.url:
-                # 1. Click CREATE button
-                create_btn = page.locator('button[aria-label="Create"], ytcp-button:has-text("Create")').first
-                create_btn.wait_for(state="visible", timeout=15000)
-                create_btn.click()
-                time.sleep(1.5)
+            # Wait for wizard modal to appear
+            page.wait_for_timeout(5000)
 
-                # 2. Click "Upload videos"
-                upload_item = page.locator('tp-yt-paper-item:has-text("Upload videos"), ytcp-text-menu-item:has-text("Upload videos")').first
-                upload_item.wait_for(state="visible", timeout=10000)
-                upload_item.click()
-                time.sleep(2)
-
-            # 3. Supply MP4 to input[type="file"]
-            file_input = page.locator('input[type="file"]').first
-            file_input.wait_for(state="attached", timeout=10000)
-            log.info("[YouTube Shorts] Uploading file %s...", mp4_path)
-            file_input.set_input_files(str(mp4_path.resolve()))
-
-            # 4. Wait for metadata form
-            title_box = page.locator('#title-textarea #textbox, #textarea-container #textbox').first
-            title_box.wait_for(state="visible", timeout=30000)
-            time.sleep(2)
-
-            # Set title
-            title_box.click()
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Backspace")
-            time.sleep(0.5)
-            title_box.fill(short_title)
-            log.info("[YouTube Shorts] Title filled successfully.")
-
-            # Set description
-            desc_box = page.locator('#description-textarea #textbox, #description-container #textbox').first
-            if desc_box.is_visible():
-                desc_box.click()
-                desc_box.fill(short_desc)
-                log.info("[YouTube Shorts] Description filled successfully.")
-
-            # Select "No, it's not made for kids"
+            # ── Step 2: Click "Not made for kids" radio ───────────────────────
             kids_radio = page.locator('[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]').first
-            kids_radio.wait_for(state="visible", timeout=10000)
-            kids_radio.click()
-            log.info("[YouTube Shorts] Selected 'Not made for kids'.")
-            time.sleep(1)
+            if kids_radio.count() > 0 and kids_radio.is_visible():
+                kids_radio.click()
+                log.info("[YouTube Shorts] Selected 'Not made for kids'.")
+                time.sleep(1)
+            else:
+                log.warning("[YouTube Shorts] Kids radio not visible — may already be set.")
 
-            # Wait for short URL to appear after upload processing
-            time.sleep(5)
-            short_url = _extract_short_url(page)
+            # Save diagnostic screenshot after kids step
+            page.screenshot(path=str(OUT_DIR / "yt_step_kids.png"), full_page=True)
 
-            # 5. Navigate through Next steps (Details -> Video elements -> Checks -> Visibility)
+            # ── Step 3: Adaptive Next loop until visibility step ──────────────
             next_btn = page.locator('#next-button').first
-            for step_idx in range(1, 4):
-                next_btn.wait_for(state="visible", timeout=10000)
-                next_btn.click()
-                log.info("[YouTube Shorts] Clicked Next (%d/3)", step_idx)
-                time.sleep(2)
+            next_clicks = 0
+            while next_clicks < 5:
+                # Check if PUBLIC radio is already visible (we reached visibility step)
+                public_check = page.locator('tp-yt-paper-radio-button[name="PUBLIC"], [name="PUBLIC"]')
+                if public_check.count() > 0 and public_check.is_visible():
+                    log.info("[YouTube Shorts] Reached visibility step after %d Next clicks.", next_clicks)
+                    break
 
-            # 6. Select "Public" visibility
-            public_radio = page.locator('[name="PUBLIC"]').first
-            public_radio.wait_for(state="visible", timeout=10000)
-            public_radio.click()
-            log.info("[YouTube Shorts] Selected 'Public' visibility.")
-            time.sleep(1)
+                if next_btn.count() > 0 and next_btn.is_visible():
+                    disabled = next_btn.get_attribute("disabled")
+                    if disabled:
+                        log.info("[YouTube Shorts] Next button disabled at step %d — stopping.", next_clicks)
+                        break
+                    next_btn.click()
+                    next_clicks += 1
+                    log.info("[YouTube Shorts] Clicked Next #%d", next_clicks)
+                    page.wait_for_timeout(3000)
+                else:
+                    log.info("[YouTube Shorts] Next button not visible — wizard may be done.")
+                    break
 
-            # If short_url not captured yet, check again on Visibility screen
-            if not short_url:
-                short_url = _extract_short_url(page)
+            # Save diagnostic screenshot at visibility step
+            page.screenshot(path=str(OUT_DIR / "yt_step_visibility.png"), full_page=True)
 
-            # 7. Click Publish ("#done-button")
+            # ── Step 4: Click PUBLIC radio ────────────────────────────────────
+            public_radio = page.locator('tp-yt-paper-radio-button[name="PUBLIC"], [name="PUBLIC"]').first
+            if public_radio.count() > 0 and public_radio.is_visible():
+                public_radio.scroll_into_view_if_needed()
+                public_radio.click()
+                page.wait_for_timeout(2000)
+                # Verify PUBLIC is now checked
+                checked = public_radio.get_attribute("checked") or ""
+                log.info("[YouTube Shorts] Selected 'Public' visibility (checked=%s).", checked)
+            else:
+                log.error("[YouTube Shorts] PUBLIC radio not visible after %d Next clicks.", next_clicks)
+                page.close()
+                return {"success": False, "short_url": None, "error": "PUBLIC radio not visible"}
+
+            # ── Step 5: Click Done / Publish ──────────────────────────────────
             done_btn = page.locator('#done-button').first
-            done_btn.wait_for(state="visible", timeout=10000)
-            done_btn.click()
-            log.info("[YouTube Shorts] Clicked Publish / Done!")
-            time.sleep(6)
+            if done_btn.count() > 0 and done_btn.is_visible():
+                disabled = done_btn.get_attribute("disabled")
+                if disabled:
+                    log.warning("[YouTube Shorts] Done button still disabled after selecting PUBLIC.")
+                else:
+                    done_btn.click()
+                    log.info("[YouTube Shorts] Clicked Publish / Done!")
+                    page.wait_for_timeout(3000)
 
-            # Look for post-publish dialog short link if still not found
-            if not short_url:
-                short_url = _extract_short_url(page)
+                    # Handle "Publish anyway" / checks dialog if it appears
+                    for attempt in range(3):
+                        try:
+                            confirm_btn = page.locator('#secondary-action-button, button:has-text("Publish anyway"), button:has-text("Continue"), [aria-label*="Publish anyway"]').first
+                            if confirm_btn.count() > 0 and confirm_btn.is_visible():
+                                confirm_btn.click()
+                                log.info("[YouTube Shorts] Clicked confirmation dialog button.")
+                                page.wait_for_timeout(3000)
+                            else:
+                                break
+                        except Exception:
+                            break
 
-            # Fallback format if youtu.be was returned
-            if short_url and "youtu.be/" in short_url:
-                vid_part = short_url.split("youtu.be/")[-1].split("?")[0]
-                short_url = f"https://www.youtube.com/shorts/{vid_part}"
+                    # ── Step 6: Wait for post-publish share dialog ────────────
+                    for attempt in range(45):  # up to 45 seconds
+                        short_url = _extract_short_url(page)
+                        if short_url:
+                            log.info("[YouTube Shorts] Captured Short URL: %s", short_url)
+                            break
+                        time.sleep(1)
+                    else:
+                        log.warning("[YouTube Shorts] Short URL not captured after 45s wait.")
+
+                    # Save final screenshot
+                    page.screenshot(path=str(OUT_DIR / "yt_published.png"), full_page=True)
+            else:
+                log.error("[YouTube Shorts] Done button not visible.")
 
             page.close()
 
