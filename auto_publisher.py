@@ -699,13 +699,41 @@ def dispatch_whatsapp_media(
 
 def ensure_poster_exists(item: dict) -> str:
     """Ensures 4:5 Headless Chrome poster exists at vastu_content_queue/thumbnails/yt_<ID>.jpg."""
+    from PIL import Image as PILImage
+
     THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
     poster_path = THUMBNAILS_DIR / f"{item['id']}.jpg"
 
+    needs_regen = False
     if not poster_path.exists() or poster_path.stat().st_size == 0:
+        needs_regen = True
+    else:
+        # Validate existing poster is exactly 1080x1350
+        try:
+            with PILImage.open(poster_path) as chk:
+                pw, ph = chk.size
+            if pw != 1080 or ph != 1350:
+                log.info("Poster %s is %dx%d, regenerating to 1080x1350", poster_path.name, pw, ph)
+                needs_regen = True
+        except Exception:
+            needs_regen = True
+
+    if needs_regen:
         log.info("Generating Headless Chrome poster for: %s", item["id"])
         from html_poster_generator import render_html_to_poster
         render_html_to_poster(item, poster_path)
+
+        # Re-validate after regeneration
+        try:
+            with PILImage.open(poster_path) as chk:
+                pw, ph = chk.size
+            if pw != 1080 or ph != 1350:
+                raise RuntimeError(
+                    f"Regenerated poster {poster_path.name} is {pw}x{ph}, expected 1080x1350"
+                )
+        except Exception as exc:
+            log.error("Poster validation failed for %s: %s", poster_path.name, exc)
+            raise
 
     item["has_thumbnail"] = True
     item["thumbnail_file"] = f"vastu_content_queue\\thumbnails\\{item['id']}.jpg"

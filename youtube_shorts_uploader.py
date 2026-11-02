@@ -183,61 +183,319 @@ def get_telugu_font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont:
 #  Step A: Static Poster to 9:16 Vertical .mp4 Short Conversion                #
 # ---------------------------------------------------------------------------- #
 
+def _fetch_thumb_b64(video_id: str) -> str:
+    """Fetch best available YouTube thumbnail as base64 data URL."""
+    import base64, io
+    import requests
+    from PIL import Image as PILImage
+    urls = [
+        f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
+        f"https://img.youtube.com/vi/{video_id}/sddefault.jpg",
+        f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+    ]
+    for url in urls:
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200 and len(resp.content) > 1000:
+                img = PILImage.open(io.BytesIO(resp.content))
+                if img.size == (120, 90) or img.size[0] < 200:
+                    continue
+                b64 = base64.b64encode(resp.content).decode()
+                return f"data:image/jpeg;base64,{b64}"
+        except Exception:
+            continue
+    # Fallback solid maroon
+    fb = PILImage.new("RGB", (1280, 720), (28, 8, 8))
+    buf = io.BytesIO()
+    fb.save(buf, format="JPEG")
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def _build_shorts_html(item: dict, thumb_b64: str) -> str:
+    """Build a full-bleed 1080x1920 HTML/CSS template for YouTube Shorts."""
+    video_id = item.get("video_id", "")
+    title = (item.get("title") or "సమర్థ వాస్తు").strip()
+    is_short = item.get("is_short", False)
+    yt_url = f"https://www.youtube.com/shorts/{video_id}" if is_short else f"https://www.youtube.com/watch?v={video_id}"
+
+    html = f"""<!DOCTYPE html>
+<html lang="te">
+<head>
+<meta charset="utf-8">
+<title>Samartha Vastu Short</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@700;800;900&family=Noto+Sans+Telugu:wght@400;600;700;800;900&family=Ramabhadra&display=swap" rel="stylesheet">
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+    width: 1080px;
+    height: 1920px;
+    overflow: hidden;
+    background: radial-gradient(circle at 50% 25%, #2a0808 0%, #150303 55%, #0a0101 100%);
+    font-family: 'Noto Sans Telugu', 'Segoe UI Emoji', 'Nirmala UI', sans-serif;
+    color: #fff5dc;
+    position: relative;
+}}
+/* Ornamental gold outer border */
+.outer-border {{
+    position: absolute;
+    top: 0; left: 0; width: 100%; height: 100%;
+    border: 8px solid #d4a017;
+    box-sizing: border-box;
+    pointer-events: none;
+    z-index: 10;
+}}
+/* Top header zone: y=200..360 */
+.header-zone {{
+    position: absolute;
+    top: 200px; left: 0; width: 100%; height: 160px;
+    text-align: center;
+    z-index: 5;
+}}
+.main-title {{
+    font-family: 'Cinzel', serif;
+    font-size: 46px;
+    font-weight: 900;
+    letter-spacing: 2px;
+    background: linear-gradient(180deg, #fff7c2 0%, #ffd54f 40%, #d4a017 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-shadow: 0 4px 15px rgba(212, 160, 23, 0.3);
+    line-height: 1.15;
+    margin-bottom: 4px;
+}}
+.main-title-te {{
+    font-family: 'Ramabhadra', 'Noto Sans Telugu', sans-serif;
+    font-size: 28px;
+    font-weight: 800;
+    color: #ffe599;
+    letter-spacing: 0.5px;
+    line-height: 1.25;
+}}
+.sub-title {{
+    font-size: 19px;
+    font-weight: 700;
+    color: #e6b840;
+    letter-spacing: 0.5px;
+    margin-top: 6px;
+}}
+/* Center hero thumbnail: y=390..960, 980px wide centered */
+.hero-zone {{
+    position: absolute;
+    top: 390px; left: 50px; width: 980px; height: 570px;
+    z-index: 5;
+}}
+.hero-frame {{
+    width: 100%; height: 100%;
+    border: 3px solid #d4a017;
+    border-radius: 16px;
+    background: #000;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 18px 45px rgba(0,0,0,0.85), 0 0 25px rgba(212,160,23,0.3);
+}}
+.hero-img {{
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: block;
+}}
+/* Middle headline card: y=990..1360 */
+.headline-zone {{
+    position: absolute;
+    top: 990px; left: 50px; width: 980px; height: 370px;
+    z-index: 5;
+}}
+.headline-card {{
+    width: 100%; height: 100%;
+    background: linear-gradient(180deg, rgba(26,6,6,0.92) 0%, rgba(14,3,3,0.96) 100%);
+    border: 1.5px solid rgba(212,160,23,0.6);
+    border-radius: 14px;
+    padding: 30px 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.75);
+}}
+.video-title {{
+    font-family: 'Noto Sans Telugu', 'Ramabhadra', sans-serif;
+    font-size: 34px;
+    font-weight: 800;
+    line-height: 1.45;
+    color: #fff9ea;
+    text-align: center;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+}}
+.badges {{
+    font-size: 18px;
+    font-weight: 700;
+    color: #ffd54f;
+    letter-spacing: 0.5px;
+    text-align: center;
+    margin-top: 14px;
+}}
+.svsn-badge {{
+    font-family: 'Ramabhadra', 'Noto Sans Telugu', sans-serif;
+    color: #ffe599;
+}}
+/* Safe CTA banner: y=1390..1600 */
+.cta-zone {{
+    position: absolute;
+    top: 1390px; left: 0; width: 100%; height: 210px;
+    background: linear-gradient(180deg, rgba(24,5,5,0.92) 0%, rgba(12,2,2,0.98) 100%);
+    border-top: 1px solid rgba(212,160,23,0.55);
+    border-bottom: 8px solid #d4a017;
+    z-index: 5;
+    padding: 0 60px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+}}
+.cta-line {{
+    font-family: 'Noto Sans Telugu', sans-serif;
+    font-size: 24px;
+    font-weight: 800;
+    color: #fff5dc;
+    text-align: center;
+    line-height: 1.4;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+}}
+.cta-phone {{
+    font-size: 26px;
+    font-weight: 900;
+    color: #4ade80;
+    text-align: center;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+}}
+</style>
+</head>
+<body>
+<div class="outer-border"></div>
+<div class="header-zone">
+  <div class="main-title">సమర్థ వాస్తు</div>
+  <div class="main-title-te">(సమంత ఆస్ట్రో-వాస్తు)</div>
+  <div class="sub-title">SAMARTHA ASTRO-VASTU</div>
+</div>
+<div class="hero-zone">
+  <div class="hero-frame">
+    <img src="{thumb_b64}" class="hero-img" alt="YouTube Thumbnail">
+  </div>
+</div>
+<div class="headline-zone">
+  <div class="headline-card">
+    <div class="video-title">{title}</div>
+    <div class="badges">
+      <span class="svsn-badge">SVSN రాజు &nbsp;|&nbsp; MA Astrology &amp; Vastu Shastra</span>
+    </div>
+  </div>
+</div>
+<div class="cta-zone">
+  <div class="cta-line">పూర్తి వీడియో మా YouTube ఛానెల్‌లో చూడండి</div>
+  <div class="cta-phone">📞 WhatsApp Consultation: +91 8919395559</div>
+</div>
+</body>
+</html>"""
+    return html
+
+
+def _render_shorts_frame(html_content: str, output_png: Path) -> None:
+    """Render the 1080x1920 HTML template via Headless Chrome to a PNG."""
+    import tempfile, subprocess
+    from html_poster_generator import find_chrome_binary
+
+    output_png = Path(output_png)
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    chrome_bin = find_chrome_binary()
+
+    temp_html = output_png.with_suffix(".tmp.html")
+    temp_html.write_text(html_content, encoding="utf-8")
+
+    user_data = tempfile.mkdtemp(prefix="chrome_shorts_")
+    cmd = [
+        chrome_bin,
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-gpu",
+        f"--user-data-dir={user_data}",
+        f"--screenshot={str(output_png)}",
+        "--window-size=1080,1920",
+        "--hide-scrollbars",
+        f"file:///{temp_html.as_posix()}",
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if res.returncode != 0:
+            log.warning("Chrome returned non-zero %d: %s", res.returncode, res.stderr)
+        if not output_png.exists() or output_png.stat().st_size == 0:
+            raise RuntimeError(f"Shorts frame screenshot not created: {output_png}")
+    finally:
+        try:
+            if temp_html.exists():
+                temp_html.unlink()
+        except Exception:
+            pass
+
+
 def create_shorts_video(poster_path: str | Path, output_mp4: str | Path = TEMP_MP4) -> Path:
     """
-    Takes 1080x1350 static poster and places it centered on a 1080x1920
-    dark royal maroon/gold canvas, then generates a lightweight 15s .mp4 video using ffmpeg.
+    Creates a full-bleed 1080x1920 (9:16) YouTube Short using Headless Chrome
+    HTML/CSS rendering with HarfBuzz Telugu shaping, then encodes via ffmpeg.
+    Zero PIL-based drawing remains — no more tiny left-aligned thumbnails.
     """
     poster_path = Path(poster_path)
     if not poster_path.exists():
         raise FileNotFoundError(f"Poster image not found: {poster_path}")
 
+    # Validate poster is 1080x1350 before using
+    from PIL import Image as PILImage
+    with PILImage.open(poster_path) as _chk:
+        _pw, _ph = _chk.size
+    if _pw < 1080 or _ph < 1350:
+        raise ValueError(
+            f"Poster {poster_path.name} is {_pw}x{_ph}, expected >=1080x1350. "
+            f"Regenerate via html_poster_generator.py before creating Short."
+        )
+
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     output_mp4 = Path(output_mp4)
 
-    poster = Image.open(poster_path).convert("RGB")
-    cw, ch = 1080, 1920
-    canvas = Image.new("RGB", (cw, ch), (28, 8, 8))
-    draw = ImageDraw.Draw(canvas)
+    item_id = poster_path.stem
+    # Load item from schedule for title/video_id
+    schedule = load_schedule()
+    item = None
+    for it in schedule:
+        if it.get("id") == item_id:
+            item = it
+            break
+    if item is None:
+        item = {"id": item_id, "title": "సమర్థ వాస్తు", "video_id": item_id, "is_short": False}
 
-    # Vertical gradient maroon background
-    for y in range(ch):
-        t = y / ch
-        r = int(28 + (45 - 28) * t * 0.4)
-        g = int(8 + (12 - 8) * t * 0.4)
-        b = int(8 + (12 - 8) * t * 0.4)
-        draw.line([(0, y), (cw, y)], fill=(r, g, b))
+    thumb_b64 = _fetch_thumb_b64(item.get("video_id", item_id))
+    html = _build_shorts_html(item, thumb_b64)
 
-    # Center poster at y = (1920 - 1350) // 2 = 285
-    poster_y = 285
-    canvas.paste(poster, (0, poster_y))
+    frame_png = OUT_DIR / f"shorts_frame_{item_id}.png"
+    _render_shorts_frame(html, frame_png)
 
-    # Gold framing borders
-    accent_gold = (212, 160, 23)
-    light_gold = (255, 213, 79)
-    ivory_white = (255, 245, 220)
+    # Hard validation: rendered frame must be exactly 1080x1920
+    with PILImage.open(frame_png) as chk:
+        fw, fh = chk.size
+    if fw != 1080 or fh != 1920:
+        raise RuntimeError(
+            f"Rendered Shorts frame is {fw}x{fh}, expected 1080x1920. Aborting upload."
+        )
 
-    draw.rectangle([0, 0, cw, 8], fill=accent_gold)
-    draw.rectangle([0, poster_y - 2, cw, poster_y], fill=accent_gold)
-    draw.rectangle([0, poster_y + 1350, cw, poster_y + 1352], fill=accent_gold)
-    draw.rectangle([0, ch - 8, cw, ch], fill=accent_gold)
+    log.info("[Shorts Generator] Rendered 1080x1920 frame (%d bytes)", frame_png.stat().st_size)
 
-    # Bottom banner typography (ASCII/English only — zero PIL Telugu)
-    font_sub = get_telugu_font(22, bold=True)
-    b_txt = "WATCH FULL VIDEO: @SAMARTHAVASTU999  |  WHATSAPP: +91 8919395559"
-    bb = draw.textbbox((0, 0), b_txt, font=font_sub)
-    draw.text(((cw - (bb[2] - bb[0])) // 2, 1740), b_txt, font=font_sub, fill=ivory_white)
-
-    # Save temp frame
-    canvas.save(TEMP_FRAME, quality=95)
-    log.info("[Shorts Generator] Saved 1080x1920 canvas frame (%d bytes)", TEMP_FRAME.stat().st_size)
-
-    # Run ffmpeg to generate lightweight 15-second 1080x1920 MP4 video
+    # FFmpeg: 15-second 1080x1920 MP4 from the PNG frame
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1",
-        "-i", str(TEMP_FRAME),
+        "-i", str(frame_png),
         "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
         "-c:v", "libx264",
         "-t", "15",
@@ -253,9 +511,8 @@ def create_shorts_video(poster_path: str | Path, output_mp4: str | Path = TEMP_M
         log.error("[Shorts Generator] ffmpeg error: %s", res.stderr)
         raise RuntimeError(f"ffmpeg failed: {res.stderr}")
 
-    # Remove temporary frame
     try:
-        TEMP_FRAME.unlink(missing_ok=True)
+        frame_png.unlink(missing_ok=True)
     except Exception:
         pass
 

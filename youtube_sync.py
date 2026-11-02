@@ -573,7 +573,22 @@ def sync_youtube(force_poster: bool = True) -> dict:
             top_item["caption"] = build_clean_caption(top_item)
 
         # Generate 4:5 branded poster using Headless Chrome (unbroken fonts & emojis)
+        # Validate or regenerate poster to exact 1080x1350
+        from PIL import Image as PILImage
+        needs_regen = False
         if not poster_path.exists() or not top_item.get("has_thumbnail"):
+            needs_regen = True
+        else:
+            try:
+                with PILImage.open(poster_path) as chk:
+                    pw, ph = chk.size
+                if pw != 1080 or ph != 1350:
+                    log.info("Poster %s is %dx%d, regenerating to 1080x1350", poster_path.name, pw, ph)
+                    needs_regen = True
+            except Exception:
+                needs_regen = True
+
+        if needs_regen:
             log.info("Generating Headless Chrome branded poster for top item: %s", top_item["id"])
             try:
                 from html_poster_generator import render_html_to_poster
@@ -581,8 +596,21 @@ def sync_youtube(force_poster: bool = True) -> dict:
             except Exception as exc:
                 log.warning("Headless Chrome poster note: %s — falling back to PIL", exc)
                 generate_branded_poster(top_item, poster_path)
-            top_item["has_thumbnail"] = True
-            top_item["thumbnail_file"] = f"vastu_content_queue\\thumbnails\\{top_item['id']}.jpg"
+
+        # Re-validate after generation
+        try:
+            with PILImage.open(poster_path) as chk:
+                pw, ph = chk.size
+            if pw != 1080 or ph != 1350:
+                raise RuntimeError(
+                    f"Poster {poster_path.name} is {pw}x{ph}, expected 1080x1350"
+                )
+        except Exception as exc:
+            log.error("Poster validation failed for %s: %s", poster_path.name, exc)
+            raise
+
+        top_item["has_thumbnail"] = True
+        top_item["thumbnail_file"] = f"vastu_content_queue\\thumbnails\\{top_item['id']}.jpg"
 
     # Save to master_schedule.json
     save_schedule(final_schedule)
@@ -638,14 +666,29 @@ def print_queue_status():
 
 
 def generate_all_pending_posters():
+    from PIL import Image as PILImage
+
     schedule = load_schedule()
     pending = [i for i in schedule if i.get("status") != "published"]
     print(f"Generating posters for {len(pending)} pending items...")
     for idx, item in enumerate(pending):
         p_path = BASE_DIR / "vastu_content_queue" / "thumbnails" / f"{item['id']}.jpg"
+        needs_regen = False
         if not p_path.exists():
+            needs_regen = True
+        else:
+            try:
+                with PILImage.open(p_path) as chk:
+                    pw, ph = chk.size
+                if pw != 1080 or ph != 1350:
+                    log.info("Poster %s is %dx%d, regenerating to 1080x1350", p_path.name, pw, ph)
+                    needs_regen = True
+            except Exception:
+                needs_regen = True
+        if needs_regen:
             print(f"[{idx+1}/{len(pending)}] Generating poster for {item['id']}...")
-            generate_branded_poster(item, p_path)
+            from html_poster_generator import render_html_to_poster
+            render_html_to_poster(item, p_path)
             item["has_thumbnail"] = True
             item["thumbnail_file"] = f"vastu_content_queue\\thumbnails\\{item['id']}.jpg"
     save_schedule(schedule)
