@@ -222,6 +222,7 @@ def create_shorts_video(poster_path: str | Path, output_mp4: str | Path = TEMP_M
     draw.rectangle([0, ch - 8, cw, ch], fill=accent_gold)
 
     # Bottom banner typography (ASCII/English only — zero PIL Telugu)
+    font_sub = get_telugu_font(22, bold=True)
     b_txt = "WATCH FULL VIDEO: @SAMARTHAVASTU999  |  WHATSAPP: +91 8919395559"
     bb = draw.textbbox((0, 0), b_txt, font=font_sub)
     draw.text(((cw - (bb[2] - bb[0])) // 2, 1740), b_txt, font=font_sub, fill=ivory_white)

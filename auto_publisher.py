@@ -1155,6 +1155,8 @@ def run_whatsapp_only(schedule: list, dry_run: bool = False) -> bool:
 # ---------------------------------------------------------------------------- #
 
 def main():
+    global _STABILIZED, DRY_RUN, MANUAL_RUN
+
     parser = argparse.ArgumentParser(description="Samartha Vastu 2-Stage Daily Auto Publisher")
     parser.add_argument("--daily-run",         action="store_true",
                         help="Run full morning cycle: Stage A (publish today) + Stage B (prepare tomorrow)")
