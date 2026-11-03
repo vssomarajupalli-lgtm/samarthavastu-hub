@@ -1219,6 +1219,15 @@ def main():
 
     section("Samartha Vastu Publisher" + (" [DRY-RUN]" if DRY_RUN else " [LIVE]"))
 
+    # (b1) Active-hours guard — automatic runs only between 06:00 and 21:00 local time.
+    #      Midnight/late-night task triggers exit silently with ZERO popup and ZERO posts.
+    if not DRY_RUN and not MANUAL_RUN:
+        now_hour = datetime.now().hour
+        if now_hour < 6 or now_hour >= 21:
+            log.info("[Time Guard] Current time %02d:00 is outside 06:00-21:00 window. Exiting silently (zero popup, zero posts).", now_hour)
+            release_publisher_lock()
+            return
+
     # (b) Daily Lock FIRST — if today's post is already 100% complete across
     #     all channels, exit silently in <1s WITHOUT waiting 5 minutes and
     #     WITHOUT showing any Yes/No MessageBox.
@@ -1259,6 +1268,15 @@ def main():
     if not DRY_RUN and not MANUAL_RUN and not _STABILIZED:
         _STABILIZED = True
         wait_for_stabilization(300)
+
+    # (d1) Re-check active-hours after stabilization — if time crossed 21:00,
+    #      exit silently with ZERO popup before showing confirmation.
+    if not DRY_RUN and not MANUAL_RUN:
+        now_hour = datetime.now().hour
+        if now_hour >= 21:
+            log.info("[Time Guard] Current time %02d:00 is at/after 21:00 after stabilization wait. Exiting silently.", now_hour)
+            release_publisher_lock()
+            return
 
     # (e) Show topmost Yes/No MessageBox BEFORE Facebook or Instagram runs.
     target_item_for_dialog = None

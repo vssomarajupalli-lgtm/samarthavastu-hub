@@ -663,7 +663,56 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             # Wait for wizard modal to appear
             page.wait_for_timeout(5000)
 
-            # ── Step 2: Click "Not made for kids" radio ───────────────────────
+            # ── Step 2: Fill Short Title (Telugu) into the Details modal ──────
+            title_box = page.locator('#title-textarea #textbox, #title-textarea input, div#textbox[role="textbox"]').first
+            title_box.wait_for(state="visible", timeout=30000)
+            title_box.click()
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+            page.wait_for_timeout(500)
+            # Insert the Telugu title via insert_text for reliable Unicode input
+            page.keyboard.insert_text(short_title)
+            page.wait_for_timeout(1000)
+            # Blur/tabs out to let YouTube register the change
+            title_box.press("Tab")
+            page.wait_for_timeout(1000)
+            # Assert the title was actually set and is NOT "temp short"
+            actual_title = title_box.input_value() or title_box.inner_text() or ""
+            retry = 0
+            while (not actual_title or actual_title.strip() == "temp short" or actual_title.strip() == short_title.strip()) and retry < 5:
+                log.warning("[YouTube Shorts] Title not set correctly (got: %r), retrying...", actual_title)
+                title_box.click()
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+                page.wait_for_timeout(500)
+                page.keyboard.insert_text(short_title)
+                page.wait_for_timeout(1000)
+                title_box.press("Tab")
+                page.wait_for_timeout(1000)
+                actual_title = title_box.input_value() or title_box.inner_text() or ""
+                retry += 1
+            if actual_title.strip() == "temp short" or not actual_title.strip():
+                log.error("[YouTube Shorts] Title field still shows '%s' after retries — aborting to prevent 'temp short' publish.", actual_title)
+                page.close()
+                return {"success": False, "short_url": None, "error": "Title field not set correctly (still 'temp short' or empty)"}
+            log.info("[YouTube Shorts] Title set to: %s (%d chars)", actual_title, len(actual_title))
+
+            # ── Step 2b: Fill Short Description ───────────────────────────────
+            desc_box = page.locator('#description-textarea #textbox, #description-textarea textarea').first
+            if desc_box.count() > 0 and desc_box.is_visible():
+                desc_box.click()
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+                page.wait_for_timeout(500)
+                page.keyboard.insert_text(short_desc)
+                page.wait_for_timeout(1000)
+                desc_box.press("Tab")
+                log.info("[YouTube Shorts] Description set.")
+
+            # Save diagnostic screenshot after title/description step
+            page.screenshot(path=str(OUT_DIR / "yt_step_title.png"), full_page=True)
+
+            # ── Step 2c: Click "Not made for kids" radio ─────────────────────
             kids_radio = page.locator('[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]').first
             if kids_radio.count() > 0 and kids_radio.is_visible():
                 kids_radio.click()

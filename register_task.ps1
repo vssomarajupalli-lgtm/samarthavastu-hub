@@ -1,7 +1,8 @@
 # register_task.ps1
 # Registers SamarthaVastu_Daily_8AM scheduled task in Windows Task Scheduler
 # Includes:
-#   1. Daily trigger at 08:00 AM, repeating every 1 hour for 16 hours
+#   1. Daily trigger at 06:00 AM, repeating every 1 hour for 15 hours (last check at 20:00)
+#      — NEVER fires at 12:00 AM midnight
 #   2. User Logon trigger with 45s delay
 #   3. Battery restrictions removed (runs on AC or Battery)
 #   4. StartWhenAvailable enabled (runs missed tasks immediately)
@@ -16,10 +17,10 @@ $WorkingDir = "E:\samarthavastu-hub"
 $Action = New-ScheduledTaskAction -Execute $PythonExe -Argument $ScriptArg -WorkingDirectory $WorkingDir
 
 # Define Repetition Pattern using a helper trigger
-$Helper = New-ScheduledTaskTrigger -Once -At "08:00AM" -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration (New-TimeSpan -Hours 16)
+$Helper = New-ScheduledTaskTrigger -Once -At "06:00AM" -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration (New-TimeSpan -Hours 15)
 
-# 1. Daily trigger at 08:00 AM with 16h hourly repetition
-$TriggerDaily = New-ScheduledTaskTrigger -Daily -At "08:00AM"
+# 1. Daily trigger at 06:00 AM with 15h hourly repetition (last run at 20:00)
+$TriggerDaily = New-ScheduledTaskTrigger -Daily -At "06:00AM"
 $TriggerDaily.Repetition = $Helper.Repetition
 
 # 2. At Logon trigger with 45s delay
@@ -33,7 +34,7 @@ $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatt
 $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
 
 try {
-    Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger @($TriggerDaily, $TriggerLogon) -Settings $Settings -Principal $Principal -Description "Samartha Vastu Daily 8AM with 16h Hourly Catch-up and Logon Trigger" -Force -ErrorAction Stop | Out-Null
+    Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger @($TriggerDaily, $TriggerLogon) -Settings $Settings -Principal $Principal -Description "Samartha Vastu Daily 6AM with 15h Hourly Catch-up (06:00-21:00) and Logon Trigger" -Force -ErrorAction Stop | Out-Null
     Write-Host "Register-ScheduledTask registered task successfully."
 } catch {
     Write-Error "Task registration failed: $_"
