@@ -875,13 +875,16 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
     ig_post_url = ig_res.get("post_url", "")
 
     # 3. YouTube Shorts (@samarthavastu999)
-    if target_item.get("yt_short_url"):
-        log.info("[YouTube Shorts] Already published for %s: %s (Skipping re-upload)", item_id, target_item["yt_short_url"])
+    existing_yt_url = target_item.get("yt_short_url", "")
+    if existing_yt_url and "gg3nNP0kueg" not in existing_yt_url and "@samarthavastu999/shorts" not in existing_yt_url:
+        log.info("[YouTube Shorts] Already published for %s: %s (Skipping re-upload)", item_id, existing_yt_url)
         yt_res = {
             "success": True,
-            "short_url": target_item["yt_short_url"],
+            "short_url": existing_yt_url,
         }
     else:
+        if existing_yt_url:
+            log.warning("[YouTube Shorts] Stale/fallback URL detected for %s: %s — will re-upload to get correct short URL", item_id, existing_yt_url)
         try:
             wait_for_unlocked_desktop(timeout_sec=1800)
             from youtube_shorts_uploader import upload_short_to_youtube
@@ -893,7 +896,7 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
             log.error("[YouTube Shorts] Upload error: %s", exc)
             yt_res = {"success": False, "short_url": None, "error": str(exc)}
 
-    yt_short_url = yt_res.get("short_url") or target_item.get("yt_short_url", "")
+    yt_short_url = yt_res.get("short_url", "") if yt_res.get("success") else ""
 
     # 4. WhatsApp Public Group & Personal WhatsApp
     group_caption = build_whatsapp_caption(target_item, is_preview=False, is_admin=False)
@@ -1024,6 +1027,21 @@ def run_stage_b_prepare_tomorrow(schedule: list, dry_run: bool = False) -> dict 
     log.info("[Stage B] Selected Tomorrow's Candidate: %s (%s)", candidate["id"], candidate.get("title", "")[:45])
     log.info("[Stage B] Upload Date: %s | Remaining Unposted: %d", candidate.get("upload_date"), remaining_unposted)
     log.info("[Stage B] Sending Preview ONLY to Personal WhatsApp: %s", WHATSAPP_ADMIN)
+
+    # Send a plain-text separator message FIRST so Stage A and Stage B posters
+    # NEVER appear side-by-side in WhatsApp (album grouping prevention).
+    separator_text = "📋 రేపటి వీడియో ప్రివ్యూ (Tomorrow's Scheduled Preview)"
+    log.info("[Stage B] Sending separator message before preview poster...")
+    sep_res = dispatch_whatsapp_media(
+        WHATSAPP_ADMIN,
+        None,  # no image — text only
+        separator_text,
+        tag="admin_preview_separator",
+        dry_run=dry_run,
+    )
+    if not dry_run and not sep_res.get("success"):
+        log.warning("[Stage B] Separator message dispatch failed, but continuing with preview...")
+    time.sleep(3)  # wait 3 seconds so the text bubble separates from the poster
 
     sent = dispatch_whatsapp_media(
         WHATSAPP_ADMIN,

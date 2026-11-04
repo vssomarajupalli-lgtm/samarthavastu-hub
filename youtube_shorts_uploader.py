@@ -636,13 +636,28 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             draft_title = item.get("title", "")
             edit_clicked = False
             try:
-                # Find row containing the draft title
-                row = page.locator(f'tr:has-text("{draft_title[:40]}"), ytcp-video-row:has-text("{draft_title[:40]}")').first
+                # Find row containing the draft title (regardless of Draft/Private visibility)
+                row = page.locator(f'ytcp-video-row:has-text("{draft_title[:40]}"), tr:has-text("{draft_title[:40]}")').first
                 if row.count() > 0 and row.is_visible():
-                    edit_btn = row.locator('[aria-label="Edit draft"], ytcp-button:has-text("Edit draft"), button:has-text("Edit draft")').first
+                    # Check visibility badge - proceed for both Draft and Private
+                    row_text = row.inner_text() or ""
+                    visibility_text = ""
+                    for vw in ["Private", "Draft", "Public", "Unlisted", "Scheduled"]:
+                        if vw.lower() in row_text.lower():
+                            visibility_text = vw
+                            break
+                    log.info("[YouTube Shorts] Found existing draft with visibility='%s': %s", visibility_text, draft_title[:40])
+                    
+                    edit_btn = row.locator('[aria-label="Edit"], ytcp-button:has-text("Edit"), button:has-text("Edit"), ytcp-button:has-text("Edit draft"), button:has-text("Edit draft")').first
                     if edit_btn.count() > 0 and edit_btn.is_visible():
                         edit_btn.click()
-                        log.info("[YouTube Shorts] Clicked 'Edit draft' for existing draft.")
+                        log.info("[YouTube Shorts] Clicked 'Edit' for existing draft.")
+                        edit_clicked = True
+                    else:
+                        # Try clicking the row itself to open details
+                        row.click()
+                        page.wait_for_timeout(3000)
+                        log.info("[YouTube Shorts] Clicked row to open details.")
                         edit_clicked = True
             except Exception as exc:
                 log.info("[YouTube Shorts] No existing draft found to edit: %s", exc)
@@ -679,7 +694,7 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             # Assert the title was actually set and is NOT "temp short"
             actual_title = title_box.input_value() or title_box.inner_text() or ""
             retry = 0
-            while (not actual_title or actual_title.strip() == "temp short" or actual_title.strip() == short_title.strip()) and retry < 5:
+            while (not actual_title or actual_title.strip() == "temp short" or actual_title.strip() != short_title.strip()) and retry < 5:
                 log.warning("[YouTube Shorts] Title not set correctly (got: %r), retrying...", actual_title)
                 title_box.click()
                 page.keyboard.press("Control+A")
@@ -751,14 +766,42 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             page.screenshot(path=str(OUT_DIR / "yt_step_visibility.png"), full_page=True)
 
             # ── Step 4: Click PUBLIC radio ────────────────────────────────────
-            public_radio = page.locator('tp-yt-paper-radio-button[name="PUBLIC"], [name="PUBLIC"]').first
+            public_radio = page.locator('tp-yt-paper-radio-button[name="PUBLIC"] #radioContainer, tp-yt-paper-radio-button[name="PUBLIC"]').first
             if public_radio.count() > 0 and public_radio.is_visible():
+                # Click PUBLIC radio button (click #radioContainer inner element for reliable toggle)
                 public_radio.scroll_into_view_if_needed()
                 public_radio.click()
-                page.wait_for_timeout(2000)
-                # Verify PUBLIC is now checked
-                checked = public_radio.get_attribute("checked") or ""
-                log.info("[YouTube Shorts] Selected 'Public' visibility (checked=%s).", checked)
+                page.wait_for_timeout(1000)
+
+                # ASSERT: PUBLIC radio must be checked AND #done-button must say "Publish" (not "Save")
+                public_checked = False
+                done_says_publish = False
+                for attempt in range(5):
+                    # Check PUBLIC radio state
+                    checked_attr = public_radio.get_attribute("checked") or ""
+                    aria_checked = public_radio.get_attribute("aria-checked") or ""
+                    public_checked = ("checked" in checked_attr.lower()) or (aria_checked.lower() == "true")
+
+                    # Check #done-button text
+                    done_btn_check = page.locator('#done-button').first
+                    done_text = ""
+                    if done_btn_check.count() > 0 and done_btn_check.is_visible():
+                        done_text = done_btn_check.inner_text() or ""
+                    done_says_publish = ("publish" in done_text.lower()) and ("save" not in done_text.lower())
+
+                    if public_checked and done_says_publish:
+                        log.info("[YouTube Shorts] PUBLIC selected and verified (checked=%s, done_button='%s').", checked_attr, done_text)
+                        break
+
+                    log.warning("[YouTube Shorts] PUBLIC not yet confirmed (checked=%s, done_button='%s'), retrying click...", checked_attr, done_text)
+                    # Re-click the radio button
+                    public_radio.click()
+                    page.wait_for_timeout(1000)
+
+                if not public_checked or not done_says_publish:
+                    log.error("[YouTube Shorts] PUBLIC radio not properly selected after retries (checked=%s, done_button='%s').", checked_attr, done_text)
+                    page.close()
+                    return {"success": False, "short_url": None, "error": "PUBLIC radio not properly selected"}
             else:
                 log.error("[YouTube Shorts] PUBLIC radio not visible after %d Next clicks.", next_clicks)
                 page.close()
@@ -767,42 +810,71 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             # ── Step 5: Click Done / Publish ──────────────────────────────────
             done_btn = page.locator('#done-button').first
             if done_btn.count() > 0 and done_btn.is_visible():
-                disabled = done_btn.get_attribute("disabled")
-                if disabled:
-                    log.warning("[YouTube Shorts] Done button still disabled after selecting PUBLIC.")
+                done_text = done_btn.inner_text() or ""
+                if "save" in done_text.lower():
+                    log.error("[YouTube Shorts] Done button still says 'Save' — PUBLIC not applied. Aborting to prevent 'Saved as private'.")
+                    page.close()
+                    return {"success": False, "short_url": None, "error": "Done button still says Save — PUBLIC not applied"}
+                done_btn.click()
+                log.info("[YouTube Shorts] Clicked Publish / Done!")
+                page.wait_for_timeout(3000)
+
+                # Handle "Publish anyway" / checks dialog if it appears
+                for attempt in range(3):
+                    try:
+                        confirm_btn = page.locator('#secondary-action-button, button:has-text("Publish anyway"), button:has-text("Continue"), [aria-label*="Publish anyway"]').first
+                        if confirm_btn.count() > 0 and confirm_btn.is_visible():
+                            confirm_btn.click()
+                            log.info("[YouTube Shorts] Clicked confirmation dialog button.")
+                            page.wait_for_timeout(3000)
+                        else:
+                            break
+                    except Exception:
+                        break
+
+                # ── Step 6: Wait for post-publish share dialog ────────────
+                for attempt in range(45):  # up to 45 seconds
+                    short_url = _extract_short_url(page)
+                    if short_url:
+                        log.info("[YouTube Shorts] Captured Short URL: %s", short_url)
+                        break
+                    time.sleep(1)
                 else:
-                    done_btn.click()
-                    log.info("[YouTube Shorts] Clicked Publish / Done!")
-                    page.wait_for_timeout(3000)
+                    log.warning("[YouTube Shorts] Short URL not captured after 45s wait.")
 
-                    # Handle "Publish anyway" / checks dialog if it appears
-                    for attempt in range(3):
-                        try:
-                            confirm_btn = page.locator('#secondary-action-button, button:has-text("Publish anyway"), button:has-text("Continue"), [aria-label*="Publish anyway"]').first
-                            if confirm_btn.count() > 0 and confirm_btn.is_visible():
-                                confirm_btn.click()
-                                log.info("[YouTube Shorts] Clicked confirmation dialog button.")
-                                page.wait_for_timeout(3000)
-                            else:
-                                break
-                        except Exception:
-                            break
+                # Save final screenshot
+                page.screenshot(path=str(OUT_DIR / "yt_published.png"), full_page=True)
 
-                    # ── Step 6: Wait for post-publish share dialog ────────────
-                    for attempt in range(45):  # up to 45 seconds
-                        short_url = _extract_short_url(page)
-                        if short_url:
-                            log.info("[YouTube Shorts] Captured Short URL: %s", short_url)
-                            break
-                        time.sleep(1)
+                # ── Step 7: VERIFY on Shorts table that Visibility says "Public" ──
+                # Navigate back to Shorts page to confirm visibility
+                page.goto(f"https://studio.youtube.com/channel/{TARGET_CHANNEL_ID}/videos/short", wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(5000)
+
+                # Find the row for this video and check visibility
+                short_id = None
+                if short_url:
+                    short_id = short_url.split("/shorts/")[-1].split("?")[0]
+
+                visibility_verified = False
+                if short_id:
+                    # Look for the row containing this short's video ID or title
+                    row = page.locator(f'ytcp-video-row:has-text("{short_id}"), tr:has-text("{short_id}")').first
+                    if row.count() > 0 and row.is_visible():
+                        row_text = row.inner_text() or ""
+                        if "Public" in row_text or "public" in row_text.lower():
+                            visibility_verified = True
+                            log.info("[YouTube Shorts] Verified: Row shows Public visibility: %s", row_text[:100])
+                        else:
+                            log.warning("[YouTube Shorts] Row found but visibility not Public: %s", row_text[:200])
                     else:
-                        log.warning("[YouTube Shorts] Short URL not captured after 45s wait.")
+                        log.warning("[YouTube Shorts] Row not found for short ID %s", short_id)
 
-                    # Save final screenshot
-                    page.screenshot(path=str(OUT_DIR / "yt_published.png"), full_page=True)
-            else:
-                log.error("[YouTube Shorts] Done button not visible.")
+                if not visibility_verified:
+                    log.error("[YouTube Shorts] Could not verify Public visibility on Shorts table.")
+                    page.close()
+                    return {"success": False, "short_url": None, "error": "Visibility not verified as Public on Shorts table"}
 
+                log.info("[YouTube Shorts] Upload verified as PUBLIC on Shorts table.")
             page.close()
 
     except Exception as exc:

@@ -277,28 +277,56 @@ def send_whatsapp_media(
             log.warning("[WhatsApp Sender] Screenshot 2 error: %s", exc)
 
         # Step d: Fill caption in media-preview caption box
-        log.info("[WhatsApp Sender] Filling caption in media preview...")
+        # IMPORTANT: Must use the media-preview overlay caption box (div[contenteditable="true"]
+        # inside the media editor), NOT the #main footer caption box which sits behind the overlay.
+        log.info("[WhatsApp Sender] Filling caption in media preview caption box...")
         caption_selectors = [
+            # WhatsApp Web media preview overlay caption box
             'div[contenteditable="true"][data-testid="media-caption"]',
+            'div[data-testid="media-caption"] div[contenteditable="true"]',
+            'div[data-testid="media-caption-editor"] div[contenteditable="true"]',
+            'div[data-testid="media-editor"] div[contenteditable="true"]',
+            # Fallback: any contenteditable div visible in the overlay area
             'div[contenteditable="true"]',
-            '[role="textbox"]',
         ]
         caption_filled = False
+        caption_text = ""
         for sel in caption_selectors:
             try:
                 loc = page.locator(sel).first
                 if loc.count() > 0 and loc.is_visible():
+                    # Check if this is the media-preview caption box (has content) or main chat input
                     loc.click()
+                    page.wait_for_timeout(500)
                     page.keyboard.press("Control+A")
                     page.keyboard.press("Backspace")
-                    loc.fill(caption)
-                    caption_filled = True
-                    log.info("[WhatsApp Sender] Caption filled via %s", sel)
-                    break
+                    page.wait_for_timeout(300)
+                    # Use insert_text for reliable Unicode/Telugu input
+                    page.keyboard.insert_text(caption)
+                    page.wait_for_timeout(1000)
+                    # ASSERT: caption must be non-empty before sending
+                    actual_caption = loc.inner_text() or loc.input_value() or ""
+                    if actual_caption.strip() and len(actual_caption.strip()) >= 20:
+                        caption_filled = True
+                        log.info("[WhatsApp Sender] Caption filled and verified via %s (len=%d)", sel, len(actual_caption.strip()))
+                        break
+                    else:
+                        log.warning("[WhatsApp Sender] Caption not retained in %s (got: %r)", sel, actual_caption[:50])
             except Exception:
                 continue
         if not caption_filled:
-            log.warning("[WhatsApp Sender] Caption box not found — proceeding without caption.")
+            log.error("[WhatsApp Sender] Could not fill caption in media preview overlay — aborting to prevent captionless send.")
+            page.close()
+            browser.close()
+            p.stop()
+            return {
+                "target": target,
+                "debug_1": debug_1,
+                "debug_2": debug_2,
+                "debug_3": debug_3,
+                "success": False,
+                "error": "Caption box not found or caption not retained in media preview overlay",
+            }
 
         time.sleep(2)
 
