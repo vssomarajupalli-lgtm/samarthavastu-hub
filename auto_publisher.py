@@ -23,7 +23,7 @@ Workflow:
     3. Renders 4:5 poster using Headless Chrome (html_poster_generator.py).
     4. Marks item as "status": "preview_approved" for tomorrow.
     5. Sends poster + caption ONLY to Personal WhatsApp (+918919395559) prefixed with:
-       "🔔 [TOMORROW'S PREVIEW — FOR YOUR CHECK ONLY]"
+       "📋 రేపటి వీడియో ప్రివ్యూ (Tomorrow's Scheduled Preview)"
        with a 3-line status receipt showing remaining unposted videos.
 
   Skip Control:

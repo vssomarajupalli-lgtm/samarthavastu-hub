@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+
 
 BASE_DIR        = Path(__file__).resolve().parent
 QUEUE_DIR       = BASE_DIR / "vastu_content_queue"
@@ -161,22 +161,6 @@ def save_schedule(items: list):
         bak_file.unlink(missing_ok=True)
     except OSError:
         pass
-
-
-def get_telugu_font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont:
-    candidates = [
-        "C:/Windows/Fonts/NirmalaB.ttf" if bold else "C:/Windows/Fonts/Nirmala.ttc",
-        "C:/Windows/Fonts/gautamib.ttf" if bold else "C:/Windows/Fonts/gautami.ttf",
-        "C:/Windows/Fonts/Vani.ttf",
-        "C:/Windows/Fonts/arialbd.ttf",
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            try:
-                return ImageFont.truetype(p, size)
-            except Exception:
-                continue
-    return ImageFont.load_default()
 
 
 # ---------------------------------------------------------------------------- #
@@ -907,134 +891,6 @@ def _extract_short_url(page) -> str | None:
     except Exception:
         pass
     return None
-
-
-def upload_short_via_gui(item: dict, mp4_path: Path, short_title: str, short_desc: str) -> dict:
-    """
-    Robust native GUI automation fallback:
-    Controls the user's active, authenticated Google Chrome window on the interactive desktop,
-    ensures channel is strictly @samarthavastu999, and executes upload through YouTube Studio UI.
-    """
-    try:
-        import ctypes
-        ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
-        import win32gui
-        import win32con
-        import win32service
-        import pyperclip
-        import pyautogui
-
-        hdesk = win32service.OpenDesktop('default', 0, False, win32con.GENERIC_ALL)
-        hdesk.SetThreadDesktop()
-
-        # Find Chrome window
-        target_hwnd = None
-        def enum_cb(h, _):
-            nonlocal target_hwnd
-            if win32gui.IsWindowVisible(h):
-                txt = win32gui.GetWindowText(h)
-                if ("YouTube Studio" in txt or "Google Chrome" in txt) and "Visual Studio Code" not in txt and "Antigravity" not in txt:
-                    target_hwnd = h
-        win32gui.EnumWindows(enum_cb, None)
-
-        if not target_hwnd:
-            log.warning("[GUI Uploader] Active Chrome window not found. Launching Chrome...")
-            subprocess.Popen(["chrome.exe", STUDIO_URL], shell=True)
-            time.sleep(5)
-            win32gui.EnumWindows(enum_cb, None)
-
-        if not target_hwnd:
-            return {"success": False, "error": "Could not locate or launch Chrome for GUI upload"}
-
-        user32 = ctypes.windll.user32
-        user32.ShowWindow(target_hwnd, win32con.SW_SHOWMAXIMIZED)
-        user32.SetForegroundWindow(target_hwnd)
-        time.sleep(1)
-
-        # Navigate to STUDIO_URL to ensure we are strictly on SAMARTHA VASTU channel
-        pyautogui.hotkey('ctrl', 'l')
-        time.sleep(0.5)
-        pyperclip.copy(STUDIO_URL)
-        pyautogui.hotkey('ctrl', 'v')
-        pyautogui.press('enter')
-        time.sleep(6)
-
-        # 1. Click Create button at (1670, 268)
-        log.info("[GUI Uploader] Clicking Create button...")
-        pyautogui.click(1670, 268)
-        time.sleep(1.5)
-
-        # 2. Click Upload videos at (1650, 340)
-        log.info("[GUI Uploader] Clicking Upload videos...")
-        pyautogui.click(1650, 340)
-        time.sleep(2.5)
-
-        # 3. Click Select files at (952, 810)
-        log.info("[GUI Uploader] Clicking Select files...")
-        pyautogui.click(952, 810)
-        time.sleep(2.0)
-
-        # 4. Supply MP4 path
-        log.info("[GUI Uploader] Selecting MP4 file...")
-        pyperclip.copy(str(mp4_path.resolve()))
-        pyautogui.hotkey('ctrl', 'v')
-        time.sleep(0.5)
-        pyautogui.press('enter')
-        time.sleep(6)
-
-        # 5. Set Short Title in Details dialog
-        log.info("[GUI Uploader] Setting Short title...")
-        pyautogui.click(400, 640)
-        time.sleep(0.5)
-        pyautogui.hotkey('ctrl', 'a')
-        time.sleep(0.3)
-        pyautogui.press('backspace')
-        time.sleep(0.3)
-        pyperclip.copy(short_title)
-        pyautogui.hotkey('ctrl', 'v')
-        time.sleep(1)
-
-        # 6. Click Next through all steps to Visibility (center: 1588, 860)
-        for step in range(1, 4):
-            log.info("[GUI Uploader] Clicking Next (%d/3)...", step)
-            pyautogui.click(1588, 860)
-            time.sleep(2.0)
-
-        # 7. Select Public (if needed) & Click Publish (center: 1580, 870)
-        log.info("[GUI Uploader] Clicking Publish at (1580, 870)...")
-        pyautogui.click(1580, 870)
-        time.sleep(7)
-
-        # 8. Close dialog
-        pyautogui.press('escape')
-        time.sleep(1)
-
-        # Query YouTube channel to get the newest Short URL — NEVER scrape channel page for a pre-existing short.
-        short_url = None
-        try:
-            import urllib.request
-            req = urllib.request.Request("https://www.youtube.com/@samarthavastu999/shorts", headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                body = resp.read().decode('utf-8', errors='ignore')
-                matches = re.findall(r'"/shorts/([a-zA-Z0-9_-]{11})"', body)
-                if matches:
-                    candidate = f"https://www.youtube.com/shorts/{matches[0]}"
-                    # Only accept if it is NOT the known stale/fallback ID
-                    if "gg3nNP0kueg" not in candidate:
-                        short_url = candidate
-                        log.info("[GUI Uploader] Verified newest short URL: %s", short_url)
-                    else:
-                        log.warning("[GUI Uploader] Scraped short is the stale fallback gg3nNP0kueg — rejecting.")
-        except Exception as e:
-            log.warning("[GUI Uploader] Could not scrape newest short ID: %s", e)
-
-        if not short_url:
-            log.error("[GUI Uploader] No valid short URL could be verified after publish. Aborting URL assignment.")
-            return {"success": False, "error": "Could not verify uploaded short URL after publish"}
-        return {"success": True, "short_url": short_url}
-    except Exception as exc:
-        log.error("[GUI Uploader] GUI automation error: %s", exc)
-        return {"success": False, "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------- #
