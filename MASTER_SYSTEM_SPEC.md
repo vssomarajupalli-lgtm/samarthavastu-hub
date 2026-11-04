@@ -59,6 +59,12 @@ For all non-manual runs (`not MANUAL_RUN`):
 ### 3.4 Manual Bypass
 - `Publish_Now.bat` runs `python auto_publisher.py --manual`, which completely bypasses the active-hours gate and the 5-minute stabilization wait whenever explicitly invoked by the user.
 
+### 3.5 Stage B Idempotency (`preview_sent_date`)
+- `run_stage_b_prepare_tomorrow()` checks `preview_sent_date` on the `preview_approved` item before any WhatsApp Web navigation.
+- If `preview_sent_date == today_str`, Stage B exits immediately with **ZERO WhatsApp Web navigation** and **ZERO duplicate messages** — preventing repeated hourly Task Scheduler triggers from re-sending the separator + poster.
+- After a successful Stage B send (separator + poster both dispatched), `preview_sent_date` is set to `today_str` and `master_schedule.json` is atomically saved via `save_schedule()`.
+- `main()` also checks `preview_sent_date` before calling Stage B for both `--prepare-tomorrow` and `--daily-run` modes, skipping Stage B entirely if already sent today.
+
 ---
 
 ## 4. Media & Poster Standards
@@ -100,6 +106,7 @@ For all non-manual runs (`not MANUAL_RUN`):
 - Opens target chats cleanly via DOM (`918919395559` for Personal Admin; group invite/sidebar match for Public Group `DvPDx43oel4LQQgqCsn7Tr`), confirming `#main footer` is mounted before interacting.
 - **Image + Caption Delivery:** Uploads `.jpg` via `input[type="file"][accept*="image"]`, locates the **media-preview overlay** caption `div[contenteditable="true"]` (distinct from background `#main footer`), inserts full Telugu caption via `page.keyboard.insert_text()`, asserts caption text length `>= 20` characters before clicking Send, and waits for delivery ticks (`[data-icon="msg-check"]` or `[data-icon="msg-dblcheck"]`). Returns `False` on any failure — never logs false `[OK]`.
 - **Vertical Stacking Separator (`send_whatsapp_text`):** Sends `"📋 రేపటి వీడియో ప్రివ్యూ (Tomorrow's Scheduled Preview)"` as a standalone text bubble before Stage B's preview image so WhatsApp always stacks posters full-width vertically for easy pinch-to-zoom on mobile. Injected in `auto_publisher.py` Stage B via `dispatch_whatsapp_text()` before the poster dispatch.
+- **Return Contract (`dispatch_whatsapp_text`):** Always returns a `dict` `{"success": bool, "target": str, "tag": str, "error": str|None}` — never a raw `bool`. Callers must use `.get("success")` on the dict, not on a bool. This prevents `AttributeError: 'bool' object has no attribute 'get'` crashes on hourly Task Scheduler retries.
 
 ### 5.3 Meta Graph API (`meta_publisher.py`)
 - Publishes `1080x1350` poster + Telugu caption to Facebook Page and Instagram Business account using credentials in `.env`.
@@ -122,6 +129,7 @@ For all non-manual runs (`not MANUAL_RUN`):
 
 ### 6.4 Truthfulness in Logs & Return Values
 - Never return `True` or log `[OK]` unless post IDs, HTTP 200 Short URLs, or WhatsApp message checkmarks are verified in the live DOM/API response.
+- `dispatch_whatsapp_text()` always returns a `dict` `{"success": bool, ...}` — never a raw `bool` — so callers can safely call `.get("success")` without `AttributeError`.
 
 ### 6.5 Git Cleanliness
 - Keep `chrome_whatsapp_profile/` untracked.

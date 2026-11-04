@@ -698,14 +698,15 @@ def dispatch_whatsapp_text(
     text: str,
     tag: str,
     dry_run: bool = False,
-) -> bool:
+) -> dict:
     """
     Sends a plain-text WhatsApp message (no image) to a target.
     Used as a separator between Stage A and Stage B posters so they never merge side-by-side.
+    Always returns a dict: {"success": bool, "target": str, "tag": str, "error": str|None}.
     """
     if dry_run:
         log.info("[WhatsApp] DRY-RUN — would send text to: %s", target)
-        return True
+        return {"success": True, "target": target, "tag": tag, "error": None, "dry_run": True}
 
     wait_for_unlocked_desktop(timeout_sec=1800)
 
@@ -719,10 +720,16 @@ def dispatch_whatsapp_text(
             target_tag=tag,
             close_tab=False,
         )
-        return bool(res.get("success"))
+        ok = bool(res.get("success"))
+        return {
+            "success": ok,
+            "target": target,
+            "tag": tag,
+            "error": res.get("error") if not ok else None,
+        }
     except Exception as exc:
         log.error("[WhatsApp] Text dispatch failed for %s: %s", target, exc)
-        return False
+        return {"success": False, "target": target, "tag": tag, "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------- #
@@ -1045,6 +1052,14 @@ def run_stage_b_prepare_tomorrow(schedule: list, dry_run: bool = False) -> dict 
         if item.get("status") == "preview_approved" and item.get("id") != candidate["id"]:
             item["status"] = "pending"
 
+    # IDEMPOTENCY: If Stage B already succeeded for this candidate today,
+    # exit immediately with ZERO WhatsApp Web navigation (prevents hourly
+    # Task Scheduler triggers from re-sending duplicate separator + poster).
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    if candidate.get("preview_sent_date") == today_str:
+        log.info("[Stage B] Preview already sent today (%s) for %s — skipping all WhatsApp sends.", today_str, candidate["id"])
+        return candidate
+
     candidate["status"] = "preview_approved"
     poster_path = ensure_poster_exists(candidate)
     remaining_unposted = sum(1 for i in schedule if i.get("status") not in ("published", "skipped") and i.get("id") != candidate["id"])
@@ -1070,7 +1085,10 @@ def run_stage_b_prepare_tomorrow(schedule: list, dry_run: bool = False) -> dict 
         tag="admin_preview_separator",
         dry_run=dry_run,
     )
-    if not dry_run and not sep_res.get("success"):
+    # Defensive: sep_res is always a dict from dispatch_whatsapp_text(), but
+    # guard against any legacy bool return so a raw bool can NEVER crash Stage B.
+    sep_ok = sep_res if isinstance(sep_res, bool) else bool(sep_res and sep_res.get("success"))
+    if not dry_run and not sep_ok:
         log.warning("[Stage B] Separator message dispatch failed, but continuing with preview...")
     time.sleep(3)  # wait 3 seconds so the text bubble separates from the poster
 
@@ -1083,6 +1101,7 @@ def run_stage_b_prepare_tomorrow(schedule: list, dry_run: bool = False) -> dict 
     )
 
     if not dry_run:
+        candidate["preview_sent_date"] = datetime.now().strftime("%Y-%m-%d")
         save_schedule(schedule)
 
     section(f"STAGE B SUMMARY — TOMORROW'S PREVIEW SENT")
@@ -1399,6 +1418,10 @@ def main():
         return
 
     if args.prepare_tomorrow:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if any(item.get("status") == "preview_approved" and item.get("preview_sent_date") == today_str for item in schedule):
+            log.info("[Stage B] Preview already sent today (%s) — skipping all WhatsApp sends.", today_str)
+            return
         run_stage_b_prepare_tomorrow(schedule, dry_run=DRY_RUN)
         return
 
@@ -1409,7 +1432,11 @@ def main():
     if args.daily_run:
         run_stage_a_public_publish(schedule, dry_run=DRY_RUN, force=args.force)
         refreshed_schedule = load_schedule()
-        run_stage_b_prepare_tomorrow(refreshed_schedule, dry_run=DRY_RUN)
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if any(item.get("status") == "preview_approved" and item.get("preview_sent_date") == today_str for item in refreshed_schedule):
+            log.info("[Stage B] Preview already sent today (%s) — skipping all WhatsApp sends.", today_str)
+        else:
+            run_stage_b_prepare_tomorrow(refreshed_schedule, dry_run=DRY_RUN)
         return
 
     print("Please specify a command mode:")
