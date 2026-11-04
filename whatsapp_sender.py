@@ -429,6 +429,217 @@ def send_whatsapp_media(
 
 
 # ---------------------------------------------------------------------------- #
+#  WhatsApp text-only send (separator messages)                                #
+# ---------------------------------------------------------------------------- #
+
+def send_whatsapp_text(
+    target: str,
+    text: str,
+    output_dir: str = r"E:\samarthavastu-hub\logs\screenshots",
+    target_tag: str = "",
+    close_tab: bool = True,
+) -> dict:
+    """
+    Sends a plain-text WhatsApp message (no image) to a target using Playwright CDP DOM automation.
+    Used as a separator between Stage A and Stage B posters so they never merge side-by-side.
+    Returns {"success": True/False, ...}. Never fakes [OK].
+    """
+    attach_to_default_desktop()
+
+    target = target.strip()
+    tag = target_tag or ("mobile" if (target.startswith("+") or target.replace(" ", "").replace("-", "").isdigit()) else "group")
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    debug_1 = str(out_dir / f"debug_1_chat_loaded_{tag}.png")
+    debug_2 = str(out_dir / f"debug_2_text_typed_{tag}.png")
+    debug_3 = str(out_dir / f"debug_3_sent_{tag}.png")
+
+    log.info("=" * 60)
+    log.info("[WhatsApp Text] Dispatching text to: %s (Tag: %s)", target, tag)
+    log.info("=" * 60)
+
+    result = connect_whatsapp_cdp()
+    if result is None:
+        return {
+            "target": target,
+            "debug_1": debug_1,
+            "debug_2": debug_2,
+            "debug_3": debug_3,
+            "success": False,
+            "error": "CDP connection failed",
+        }
+
+    p, browser, context, page = result
+
+    try:
+        if not open_whatsapp_target(page, target):
+            page.close()
+            browser.close()
+            p.stop()
+            return {
+                "target": target,
+                "debug_1": debug_1,
+                "debug_2": debug_2,
+                "debug_3": debug_3,
+                "success": False,
+                "error": "Could not open target chat",
+            }
+
+        try:
+            page.screenshot(path=debug_1, full_page=True)
+            log.info("[WhatsApp Text] Diagnostic 1 captured: %s", debug_1)
+        except Exception as exc:
+            log.warning("[WhatsApp Text] Screenshot 1 error: %s", exc)
+
+        # Step: Type text in the main chat input box (#main footer contenteditable)
+        log.info("[WhatsApp Text] Typing message in main chat input box...")
+        input_selectors = [
+            '#main footer div[contenteditable="true"]',
+            '#main footer [role="textbox"]',
+            '#main footer div[contenteditable="true"][data-testid="input"]',
+            'div[contenteditable="true"]',
+        ]
+        text_filled = False
+        for sel in input_selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() > 0 and loc.is_visible():
+                    loc.click()
+                    page.wait_for_timeout(500)
+                    page.keyboard.press("Control+A")
+                    page.wait_for_timeout(300)
+                    page.keyboard.insert_text(text)
+                    page.wait_for_timeout(1000)
+                    actual_text = loc.inner_text() or loc.input_value() or ""
+                    if actual_text.strip() and len(actual_text.strip()) >= 2:
+                        text_filled = True
+                        log.info("[WhatsApp Text] Text filled and verified via %s (len=%d)", sel, len(actual_text.strip()))
+                        break
+                    else:
+                        log.warning("[WhatsApp Text] Text not retained in %s (got: %r)", sel, actual_text[:50])
+            except Exception:
+                continue
+
+        if not text_filled:
+            log.error("[WhatsApp Text] Could not fill text in main chat input — aborting.")
+            page.close()
+            browser.close()
+            p.stop()
+            return {
+                "target": target,
+                "debug_1": debug_1,
+                "debug_2": debug_2,
+                "debug_3": debug_3,
+                "success": False,
+                "error": "Chat input box not found or text not retained",
+            }
+
+        try:
+            page.screenshot(path=debug_2, full_page=True)
+            log.info("[WhatsApp Text] Diagnostic 2 captured: %s", debug_2)
+        except Exception as exc:
+            log.warning("[WhatsApp Text] Screenshot 2 error: %s", exc)
+
+        # Step: Click Send
+        log.info("[WhatsApp Text] Clicking Send button...")
+        send_selectors = [
+            'button[aria-label="Send"]',
+            '[aria-label*="Send"]',
+            'span[data-icon="send"]',
+            'div[data-icon="send"]',
+        ]
+        send_clicked = False
+        for sel in send_selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() > 0 and loc.is_visible():
+                    loc.click()
+                    send_clicked = True
+                    log.info("[WhatsApp Text] Send clicked: %s", sel)
+                    break
+            except Exception:
+                continue
+
+        if not send_clicked:
+            log.error("[WhatsApp Text] Send button not found.")
+            page.close()
+            browser.close()
+            p.stop()
+            return {
+                "target": target,
+                "debug_1": debug_1,
+                "debug_2": debug_2,
+                "debug_3": debug_3,
+                "success": False,
+                "error": "Send button not found",
+            }
+
+        time.sleep(5)
+
+        # Verify message sent — look for checkmark in #main
+        log.info("[WhatsApp Text] Verifying message sent...")
+        sent = False
+        for _ in range(15):
+            try:
+                main_locator = page.locator("#main")
+                if main_locator.count() > 0:
+                    for check_sel in ['[data-icon="msg-dblcheck"]', '[data-icon="msg-check"]']:
+                        loc = main_locator.locator(check_sel).first
+                        if loc.count() > 0 and loc.is_visible():
+                            log.info("[WhatsApp Text] Message confirmation found: %s", check_sel)
+                            sent = True
+                            break
+                if sent:
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+
+        try:
+            page.screenshot(path=debug_3, full_page=True)
+            log.info("[WhatsApp Text] Diagnostic 3 captured: %s", debug_3)
+        except Exception as exc:
+            log.warning("[WhatsApp Text] Screenshot 3 error: %s", exc)
+
+        page.close()
+        browser.close()
+        p.stop()
+
+        if close_tab:
+            try:
+                page.close()
+            except Exception:
+                pass
+
+        return {
+            "target": target,
+            "debug_1": debug_1,
+            "debug_2": debug_2,
+            "debug_3": debug_3,
+            "success": True,
+            "error": None,
+        }
+
+    except Exception as exc:
+        log.error("[WhatsApp Text] CDP failed: %s", exc)
+        try:
+            page.close()
+            browser.close()
+            p.stop()
+        except Exception:
+            pass
+        return {
+            "target": target,
+            "debug_1": debug_1,
+            "debug_2": debug_2,
+            "debug_3": debug_3,
+            "success": False,
+            "error": f"CDP error: {exc}",
+        }
+
+
+# ---------------------------------------------------------------------------- #
 #  Legacy / compatibility shims                                                #
 # ---------------------------------------------------------------------------- #
 

@@ -693,6 +693,38 @@ def dispatch_whatsapp_media(
         return False
 
 
+def dispatch_whatsapp_text(
+    target: str,
+    text: str,
+    tag: str,
+    dry_run: bool = False,
+) -> bool:
+    """
+    Sends a plain-text WhatsApp message (no image) to a target.
+    Used as a separator between Stage A and Stage B posters so they never merge side-by-side.
+    """
+    if dry_run:
+        log.info("[WhatsApp] DRY-RUN — would send text to: %s", target)
+        return True
+
+    wait_for_unlocked_desktop(timeout_sec=1800)
+
+    from whatsapp_sender import send_whatsapp_text
+
+    try:
+        res = send_whatsapp_text(
+            target=target,
+            text=text,
+            output_dir=str(SCREENSHOTS_DIR),
+            target_tag=tag,
+            close_tab=False,
+        )
+        return bool(res.get("success"))
+    except Exception as exc:
+        log.error("[WhatsApp] Text dispatch failed for %s: %s", target, exc)
+        return False
+
+
 # ---------------------------------------------------------------------------- #
 #  Poster Resolver                                                               #
 # ---------------------------------------------------------------------------- #
@@ -1032,9 +1064,8 @@ def run_stage_b_prepare_tomorrow(schedule: list, dry_run: bool = False) -> dict 
     # NEVER appear side-by-side in WhatsApp (album grouping prevention).
     separator_text = "📋 రేపటి వీడియో ప్రివ్యూ (Tomorrow's Scheduled Preview)"
     log.info("[Stage B] Sending separator message before preview poster...")
-    sep_res = dispatch_whatsapp_media(
+    sep_res = dispatch_whatsapp_text(
         WHATSAPP_ADMIN,
-        None,  # no image — text only
         separator_text,
         tag="admin_preview_separator",
         dry_run=dry_run,
