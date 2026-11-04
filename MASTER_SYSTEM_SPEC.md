@@ -59,10 +59,12 @@ For all non-manual runs (`not MANUAL_RUN`):
 ### 3.4 Manual Bypass
 - `Publish_Now.bat` runs `python auto_publisher.py --manual`, which completely bypasses the active-hours gate and the 5-minute stabilization wait whenever explicitly invoked by the user.
 
-### 3.5 Stage B Idempotency (`preview_sent_date`)
+### 3.5 Stage B Idempotency (`preview_sent_date`, `separator_sent_date`)
 - `run_stage_b_prepare_tomorrow()` checks `preview_sent_date` on the `preview_approved` item before any WhatsApp Web navigation.
 - If `preview_sent_date == today_str`, Stage B exits immediately with **ZERO WhatsApp Web navigation** and **ZERO duplicate messages** — preventing repeated hourly Task Scheduler triggers from re-sending the separator + poster.
-- After a successful Stage B send (separator + poster both dispatched), `preview_sent_date` is set to `today_str` and `master_schedule.json` is atomically saved via `save_schedule()`.
+- **Separator anti-spam:** `separator_sent_date` is tracked separately. The separator text `"📋 రేపటి వీడియో ప్రివ్యూ (Tomorrow's Scheduled Preview)"` is sent at most once per day. If `separator_sent_date == today_str`, the separator is skipped on retries (only the poster is retried if it previously failed).
+- After a successful Stage B send (separator + poster both dispatched), both `preview_sent_date` and `separator_sent_date` are set to `today_str` and `master_schedule.json` is atomically saved via `save_schedule()`.
+- If the poster send fails, `preview_sent_date` remains unset so the next hourly run retries the poster (without re-sending the separator).
 - `main()` also checks `preview_sent_date` before calling Stage B for both `--prepare-tomorrow` and `--daily-run` modes, skipping Stage B entirely if already sent today.
 
 ---
@@ -104,7 +106,11 @@ For all non-manual runs (`not MANUAL_RUN`):
 ### 5.2 WhatsApp Web (`whatsapp_sender.py`)
 - Connects via `connect_over_cdp("http://127.0.0.1:9222")` using the isolated profile; waits for `#pane-side`.
 - Opens target chats cleanly via DOM (`918919395559` for Personal Admin; group invite/sidebar match for Public Group `DvPDx43oel4LQQgqCsn7Tr`), confirming `#main footer` is mounted before interacting.
-- **Image + Caption Delivery:** Uploads `.jpg` via `input[type="file"][accept*="image"]`, locates the **media-preview overlay** caption `div[contenteditable="true"]` (distinct from background `#main footer`), inserts full Telugu caption via `page.keyboard.insert_text()`, asserts caption text length `>= 20` characters before clicking Send, and waits for delivery ticks (`[data-icon="msg-check"]` or `[data-icon="msg-dblcheck"]`). Returns `False` on any failure — never logs false `[OK]`.
+- **Image + Caption Delivery:** Uploads `.jpg` via `input[type="file"][accept*="image"]`, locates the media-preview caption input and inserts full Telugu caption.
+- **Live Caption Selector (verified 2026-11-04, port 9222):** WhatsApp Web has ONLY ONE `contenteditable` element on the page — the main footer input (`#main footer div[contenteditable="true"][data-testid="conversation-compose-box-input"]`). WhatsApp Web reuses this same element for media-preview caption input when the image preview modal is open. There is NO separate `data-testid="media-caption"` contenteditable div.
+- **Modal Backdrop Interception:** The media preview modal backdrop intercepts normal pointer events, so the caption input click must use `force=True`.
+- **Lexical Editor:** WhatsApp Web's composer uses the Lexical rich-text editor, which ignores `page.keyboard.insert_text()` and `page.keyboard.type()`. Caption text is inserted via `page.evaluate()` running `document.execCommand('selectAll')` + `document.execCommand('insertText', false, <caption>)`, followed by a 1.5s wait for Lexical to render. Caption retention is verified via `innerText` length >= 20 characters before clicking Send.
+- Returns `False` on any failure — never logs false `[OK]`.
 - **Vertical Stacking Separator (`send_whatsapp_text`):** Sends `"📋 రేపటి వీడియో ప్రివ్యూ (Tomorrow's Scheduled Preview)"` as a standalone text bubble before Stage B's preview image so WhatsApp always stacks posters full-width vertically for easy pinch-to-zoom on mobile. Injected in `auto_publisher.py` Stage B via `dispatch_whatsapp_text()` before the poster dispatch.
 - **Return Contract (`dispatch_whatsapp_text`):** Always returns a `dict` `{"success": bool, "target": str, "tag": str, "error": str|None}` — never a raw `bool`. Callers must use `.get("success")` on the dict, not on a bool. This prevents `AttributeError: 'bool' object has no attribute 'get'` crashes on hourly Task Scheduler retries.
 

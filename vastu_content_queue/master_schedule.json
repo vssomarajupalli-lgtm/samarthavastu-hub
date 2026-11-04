@@ -339,7 +339,9 @@
     "fb_post_url": null,
     "ig_media_id": null,
     "ig_post_url": null,
-    "wa_sent": false
+    "wa_sent": false,
+    "preview_sent_date": "2026-11-04",
+    "separator_sent_date": "2026-11-04"
   },
   {
     "id": "yt_aJV2kMtrn2I",

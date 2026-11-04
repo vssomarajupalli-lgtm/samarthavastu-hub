@@ -277,16 +277,20 @@ def send_whatsapp_media(
             log.warning("[WhatsApp Sender] Screenshot 2 error: %s", exc)
 
         # Step d: Fill caption in media-preview caption box
-        # IMPORTANT: Must use the media-preview overlay caption box (div[contenteditable="true"]
-        # inside the media editor), NOT the #main footer caption box which sits behind the overlay.
+        # LIVE DOM INSPECTION (2026-11-04, port 9222): WhatsApp Web has ONLY 1
+        # contenteditable element on the page — the main footer input
+        # (data-testid="conversation-compose-box-input"). WhatsApp Web reuses this
+        # same element for media-preview caption input when the image modal is open.
+        # There is NO separate data-testid="media-caption" contenteditable div.
+        # The media preview modal backdrop intercepts pointer events, so clicks
+        # require force=True. Lexical editor intercepts keyboard simulation, so
+        # document.execCommand('insertText') is used instead of insert_text().
         log.info("[WhatsApp Sender] Filling caption in media preview caption box...")
         caption_selectors = [
-            # WhatsApp Web media preview overlay caption box
-            'div[contenteditable="true"][data-testid="media-caption"]',
-            'div[data-testid="media-caption"] div[contenteditable="true"]',
-            'div[data-testid="media-caption-editor"] div[contenteditable="true"]',
-            'div[data-testid="media-editor"] div[contenteditable="true"]',
-            # Fallback: any contenteditable div visible in the overlay area
+            # WhatsApp Web media preview caption input = main footer contenteditable
+            '#main footer div[contenteditable="true"][data-testid="conversation-compose-box-input"]',
+            '#main footer [role="textbox"][data-testid="conversation-compose-box-input"]',
+            # Fallback: any visible contenteditable div
             'div[contenteditable="true"]',
         ]
         caption_filled = False
@@ -294,16 +298,26 @@ def send_whatsapp_media(
         for sel in caption_selectors:
             try:
                 loc = page.locator(sel).first
-                if loc.count() > 0 and loc.is_visible():
-                    # Check if this is the media-preview caption box (has content) or main chat input
-                    loc.click()
+                if loc.count() > 0:
+                    # Force click — modal backdrop intercepts normal pointer events
+                    loc.click(force=True)
                     page.wait_for_timeout(500)
+                    # Clear existing content
                     page.keyboard.press("Control+A")
+                    page.wait_for_timeout(200)
                     page.keyboard.press("Backspace")
-                    page.wait_for_timeout(300)
-                    # Use insert_text for reliable Unicode/Telugu input
-                    page.keyboard.insert_text(caption)
-                    page.wait_for_timeout(1000)
+                    page.wait_for_timeout(200)
+                    # Use document.execCommand('insertText') — Lexical editor
+                    # ignores page.keyboard.insert_text() and page.keyboard.type()
+                    exec_result = page.evaluate("""(text) => {
+                        const el = document.querySelector('#main footer div[data-testid="conversation-compose-box-input"]');
+                        if (!el) return { success: false, error: 'element not found' };
+                        el.focus();
+                        document.execCommand('selectAll', false, null);
+                        const ok = document.execCommand('insertText', false, text);
+                        return { success: ok, innerText: el.innerText };
+                    }""", caption)
+                    page.wait_for_timeout(1500)
                     # ASSERT: caption must be non-empty before sending
                     actual_caption = loc.inner_text() or loc.input_value() or ""
                     if actual_caption.strip() and len(actual_caption.strip()) >= 20:

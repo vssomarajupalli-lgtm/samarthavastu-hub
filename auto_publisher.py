@@ -1075,21 +1075,30 @@ def run_stage_b_prepare_tomorrow(schedule: list, dry_run: bool = False) -> dict 
     log.info("[Stage B] Upload Date: %s | Remaining Unposted: %d", candidate.get("upload_date"), remaining_unposted)
     log.info("[Stage B] Sending Preview ONLY to Personal WhatsApp: %s", WHATSAPP_ADMIN)
 
-    # Send a plain-text separator message FIRST so Stage A and Stage B posters
-    # NEVER appear side-by-side in WhatsApp (album grouping prevention).
-    separator_text = "📋 రేపటి వీడియో ప్రివ్యూ (Tomorrow's Scheduled Preview)"
-    log.info("[Stage B] Sending separator message before preview poster...")
-    sep_res = dispatch_whatsapp_text(
-        WHATSAPP_ADMIN,
-        separator_text,
-        tag="admin_preview_separator",
-        dry_run=dry_run,
-    )
-    # Defensive: sep_res is always a dict from dispatch_whatsapp_text(), but
-    # guard against any legacy bool return so a raw bool can NEVER crash Stage B.
-    sep_ok = sep_res if isinstance(sep_res, bool) else bool(sep_res and sep_res.get("success"))
-    if not dry_run and not sep_ok:
-        log.warning("[Stage B] Separator message dispatch failed, but continuing with preview...")
+    # ANTI-SPAM: Never resend separator if already sent today (prevents hourly
+    # Task Scheduler retries from re-sending the separator text after a failed
+    # poster send). Separator is sent at most once per day.
+    sep_ok = True
+    if candidate.get("separator_sent_date") != today_str:
+        separator_text = "📋 రేపటి వీడియో ప్రివ్యూ (Tomorrow's Scheduled Preview)"
+        log.info("[Stage B] Sending separator message before preview poster...")
+        sep_res = dispatch_whatsapp_text(
+            WHATSAPP_ADMIN,
+            separator_text,
+            tag="admin_preview_separator",
+            dry_run=dry_run,
+        )
+        # sep_res is always a dict from dispatch_whatsapp_text(); guard against
+        # any legacy bool return so a raw bool can never crash Stage B.
+        sep_ok = sep_res if isinstance(sep_res, bool) else bool(sep_res and sep_res.get("success"))
+        if sep_ok and not dry_run:
+            candidate["separator_sent_date"] = today_str
+            save_schedule(schedule)
+            log.info("[Stage B] Separator sent successfully.")
+        elif not dry_run:
+            log.warning("[Stage B] Separator message dispatch failed, but continuing with preview...")
+    else:
+        log.info("[Stage B] Separator already sent today — skipping re-send.")
     time.sleep(3)  # wait 3 seconds so the text bubble separates from the poster
 
     sent = dispatch_whatsapp_media(
@@ -1100,7 +1109,10 @@ def run_stage_b_prepare_tomorrow(schedule: list, dry_run: bool = False) -> dict 
         dry_run=dry_run,
     )
 
-    if not dry_run:
+    # Only mark Stage B fully complete when BOTH separator AND poster succeeded.
+    # If the poster fails, preview_sent_date stays unset so the next hourly run
+    # retries the poster (without re-sending the separator).
+    if not dry_run and sep_ok and sent:
         candidate["preview_sent_date"] = datetime.now().strftime("%Y-%m-%d")
         save_schedule(schedule)
 
