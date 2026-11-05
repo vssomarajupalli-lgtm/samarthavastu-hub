@@ -665,12 +665,21 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             # ── Step 2: Fill Short Title (Telugu) into the Details modal ──────
             title_box = page.locator('#title-textarea #textbox, #title-textarea input, div#textbox[role="textbox"]').first
             title_box.wait_for(state="visible", timeout=30000)
-            title_box.click()
+            title_box.click(force=True)
+            page.wait_for_timeout(500)
             page.keyboard.press("Control+A")
             page.keyboard.press("Backspace")
-            page.wait_for_timeout(500)
-            # Insert the Telugu title via insert_text for reliable Unicode input
-            page.keyboard.insert_text(short_title)
+            page.wait_for_timeout(300)
+            # Use document.execCommand('insertText') — YouTube Studio's Lexical editor
+            # ignores page.keyboard.insert_text() and page.keyboard.type().
+            exec_result = page.evaluate("""(text) => {
+                const el = document.querySelector('#title-textarea #textbox, #title-textarea input, div#textbox[role="textbox"]');
+                if (!el) return { success: false, error: 'element not found' };
+                el.focus();
+                document.execCommand('selectAll', false, null);
+                const ok = document.execCommand('insertText', false, text);
+                return { success: ok, innerText: el.innerText };
+            }""", short_title)
             page.wait_for_timeout(1000)
             # Blur/tabs out to let YouTube register the change
             title_box.press("Tab")
@@ -680,11 +689,19 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             retry = 0
             while (not actual_title or actual_title.strip() == "temp short" or actual_title.strip() != short_title.strip()) and retry < 5:
                 log.warning("[YouTube Shorts] Title not set correctly (got: %r), retrying...", actual_title)
-                title_box.click()
+                title_box.click(force=True)
+                page.wait_for_timeout(500)
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Backspace")
-                page.wait_for_timeout(500)
-                page.keyboard.insert_text(short_title)
+                page.wait_for_timeout(300)
+                page.evaluate("""(text) => {
+                    const el = document.querySelector('#title-textarea #textbox, #title-textarea input, div#textbox[role="textbox"]');
+                    if (!el) return { success: false, error: 'element not found' };
+                    el.focus();
+                    document.execCommand('selectAll', false, null);
+                    const ok = document.execCommand('insertText', false, text);
+                    return { success: ok, innerText: el.innerText };
+                }""", short_title)
                 page.wait_for_timeout(1000)
                 title_box.press("Tab")
                 page.wait_for_timeout(1000)
@@ -699,11 +716,20 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             # ── Step 2b: Fill Short Description ───────────────────────────────
             desc_box = page.locator('#description-textarea #textbox, #description-textarea textarea').first
             if desc_box.count() > 0 and desc_box.is_visible():
-                desc_box.click()
-                page.keyboard.press("Control+A")
-                page.keyboard.press("Backspace")
+                desc_box.click(force=True)
                 page.wait_for_timeout(500)
-                page.keyboard.insert_text(short_desc)
+                page.keyboard.press("Control+A")
+                page.wait_for_timeout(300)
+                page.keyboard.press("Backspace")
+                page.wait_for_timeout(300)
+                page.evaluate("""(text) => {
+                    const el = document.querySelector('#description-textarea #textbox, #description-textarea textarea');
+                    if (!el) return { success: false, error: 'element not found' };
+                    el.focus();
+                    document.execCommand('selectAll', false, null);
+                    const ok = document.execCommand('insertText', false, text);
+                    return { success: ok, innerText: el.innerText };
+                }""", short_desc)
                 page.wait_for_timeout(1000)
                 desc_box.press("Tab")
                 log.info("[YouTube Shorts] Description set.")
@@ -712,13 +738,42 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             page.screenshot(path=str(OUT_DIR / "yt_step_title.png"), full_page=True)
 
             # ── Step 2c: Click "Not made for kids" radio ─────────────────────
-            kids_radio = page.locator('[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]').first
+            kids_radio = page.locator('tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"], tp-yt-paper-radio-button[name="NOT_MADE_FOR_KIDS"]').first
+            kids_asserted = False
             if kids_radio.count() > 0 and kids_radio.is_visible():
-                kids_radio.click()
+                # Scroll into view inside the modal's scrollable container
+                kids_radio.scroll_into_view_if_needed()
+                page.wait_for_timeout(500)
+                # Click #radioContainer inside the radio button for reliable toggle
+                radio_container = kids_radio.locator('#radioContainer').first
+                if radio_container.count() > 0 and radio_container.is_visible():
+                    radio_container.click()
+                else:
+                    kids_radio.click()
+                page.wait_for_timeout(1000)
+                # STRICTLY ASSERT aria-checked="true" (retry up to 5 times)
+                for attempt in range(5):
+                    checked_attr = kids_radio.get_attribute("checked") or ""
+                    aria_checked = kids_radio.get_attribute("aria-checked") or ""
+                    kids_asserted = ("checked" in checked_attr.lower()) or (aria_checked.lower() == "true")
+                    if kids_asserted:
+                        log.info("[YouTube Shorts] 'Not made for kids' selected and verified (aria-checked=%s).", aria_checked)
+                        break
+                    log.warning("[YouTube Shorts] Kids radio not yet checked (attempt %d/5), retrying...", attempt + 1)
+                    radio_container.click() if radio_container.count() > 0 else kids_radio.click()
+                    page.wait_for_timeout(1000)
+                if not kids_asserted:
+                    log.error("[YouTube Shorts] 'Not made for kids' radio could not be checked after 5 retries.")
+                    page.close()
+                    return {"success": False, "short_url": None, "error": "Kids radio not checked"}
                 log.info("[YouTube Shorts] Selected 'Not made for kids'.")
-                time.sleep(1)
             else:
                 log.warning("[YouTube Shorts] Kids radio not visible — may already be set.")
+                # Even if not visible, assert the current state
+                if kids_radio.count() > 0:
+                    aria_checked = kids_radio.get_attribute("aria-checked") or ""
+                    kids_asserted = aria_checked.lower() == "true"
+                    log.info("[YouTube Shorts] Kids radio aria-checked=%s (already set).", aria_checked)
 
             # Save diagnostic screenshot after kids step
             page.screenshot(path=str(OUT_DIR / "yt_step_kids.png"), full_page=True)
@@ -734,14 +789,34 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
                     break
 
                 if next_btn.count() > 0 and next_btn.is_visible():
+                    # Scroll modal footer into view so Next button is not intercepted by backdrop
+                    next_btn.scroll_into_view_if_needed()
+                    page.wait_for_timeout(500)
+
                     disabled = next_btn.get_attribute("disabled")
-                    if disabled:
+                    aria_disabled = next_btn.get_attribute("aria-disabled") or ""
+                    if disabled or aria_disabled.lower() == "true":
                         log.info("[YouTube Shorts] Next button disabled at step %d — stopping.", next_clicks)
                         break
-                    next_btn.click()
+
+                    # Click Next using Playwright .click(); fallback to DOM .click() if intercepted
+                    try:
+                        next_btn.click()
+                    except Exception:
+                        page.evaluate("""() => {
+                            const btn = document.querySelector('#next-button');
+                            if (btn) btn.click();
+                        }""")
                     next_clicks += 1
                     log.info("[YouTube Shorts] Clicked Next #%d", next_clicks)
                     page.wait_for_timeout(3000)
+
+                    # NON-BLOCKING: "Video processing is taking longer than expected" banner
+                    # does NOT prevent clicking Next through to Visibility. YouTube allows
+                    # publishing Public while HD processing finishes in the background.
+                    processing_banner = page.locator('text="Video processing is taking longer than expected"')
+                    if processing_banner.count() > 0 and processing_banner.first.is_visible():
+                        log.info("[YouTube Shorts] Processing banner visible — continuing to Next regardless (non-blocking).")
                 else:
                     log.info("[YouTube Shorts] Next button not visible — wizard may be done.")
                     break
