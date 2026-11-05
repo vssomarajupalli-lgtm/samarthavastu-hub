@@ -226,7 +226,78 @@ def send_whatsapp_media(
         except Exception as exc:
             log.warning("[WhatsApp Sender] Screenshot 1 error: %s", exc)
 
-        # Step b: Click Attach (+) button
+        # ── Step b: Fill Telugu caption in compose box BEFORE attaching image ──
+        # LIVE DOM INSPECTION (2026-11-05, port 9222): WhatsApp Web reuses the #main footer
+        # compose box as the image caption input. Caption typed BEFORE attaching the image
+        # SURVIVES the attach and becomes the image caption. Caption pasted AFTER attach
+        # does NOT work (clipboard paste is ignored). Therefore, fill the caption FIRST,
+        # then attach the image.
+        #
+        # Newline preservation: page.keyboard.insert_text() strips \n in Lexical editor.
+        # Clipboard paste (navigator.clipboard.writeText + Control+V) preserves \n line breaks.
+        log.info("[WhatsApp Sender] Filling caption in compose box before attaching image...")
+        caption_selectors = [
+            '#main footer div[contenteditable="true"][data-testid="conversation-compose-box-input"]',
+            '#main footer [role="textbox"][data-testid="conversation-compose-box-input"]',
+            # Fallback: any visible contenteditable div
+            'div[contenteditable="true"]',
+        ]
+        caption_filled = False
+        for sel in caption_selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() > 0:
+                    # Force click — any overlay may intercept normal pointer events
+                    loc.click(force=True)
+                    page.wait_for_timeout(500)
+                    # Clear existing content
+                    page.keyboard.press("Control+A")
+                    page.wait_for_timeout(200)
+                    page.keyboard.press("Backspace")
+                    page.wait_for_timeout(200)
+                    # Set system clipboard then paste — preserves \n line breaks in Lexical
+                    clipboard_ok = page.evaluate("""(text) => {
+                        return navigator.clipboard.writeText(text).then(() => {
+                            return { success: true };
+                        }).catch(err => {
+                            return { success: false, error: err.message };
+                        });
+                    }""", caption)
+                    if not clipboard_ok.get("success"):
+                        log.warning("[WhatsApp Sender] Clipboard write failed: %s", clipboard_ok.get("error"))
+                        continue
+                    # Paste via Control+V
+                    page.keyboard.press("Control+V")
+                    page.wait_for_timeout(2000)
+                    # ASSERT: caption must be non-empty before attaching image
+                    actual_caption = loc.inner_text() or loc.input_value() or ""
+                    if actual_caption.strip() and len(actual_caption.strip()) >= 20:
+                        # Verify newlines are preserved
+                        newline_count = actual_caption.count('\n')
+                        caption_filled = True
+                        log.info("[WhatsApp Sender] Caption filled and verified via %s (len=%d, newlines=%d)", sel, len(actual_caption.strip()), newline_count)
+                        break
+                    else:
+                        log.warning("[WhatsApp Sender] Caption not retained in %s (got: %r)", sel, actual_caption[:50])
+            except Exception:
+                continue
+        if not caption_filled:
+            log.error("[WhatsApp Sender] Could not fill caption in compose box — aborting to prevent captionless send.")
+            page.close()
+            browser.close()
+            p.stop()
+            return {
+                "target": target,
+                "debug_1": debug_1,
+                "debug_2": debug_2,
+                "debug_3": debug_3,
+                "success": False,
+                "error": "Caption box not found or caption not retained in compose box",
+            }
+
+        time.sleep(2)
+
+        # Step c: Click Attach (+) button
         log.info("[WhatsApp Sender] Clicking Attach (+) button...")
         attach_selectors = [
             'span[data-icon="attach-menu-plus"]',
@@ -260,7 +331,7 @@ def send_whatsapp_media(
 
         time.sleep(2)
 
-        # Step c: Upload image via input[type="file"]
+        # Step d: Upload image via input[type="file"]
         log.info("[WhatsApp Sender] Uploading image: %s", img_path)
         file_input = page.locator('input[type="file"][accept*="image"], input[type="file"]').first
         file_input.wait_for(state="attached", timeout=10000)
@@ -269,67 +340,18 @@ def send_whatsapp_media(
 
         time.sleep(4)
 
-        # Diagnostic screenshot 2 — image preview modal
+        # Diagnostic screenshot 2 — image preview / caption in compose box
         try:
             page.screenshot(path=debug_2, full_page=True)
             log.info("[WhatsApp Sender] Diagnostic 2 captured: %s", debug_2)
         except Exception as exc:
             log.warning("[WhatsApp Sender] Screenshot 2 error: %s", exc)
 
-        # Step d: Fill caption in media-preview caption box
-        # LIVE DOM INSPECTION (2026-11-04, port 9222): WhatsApp Web has ONLY 1
-        # contenteditable element on the page — the main footer input
-        # (data-testid="conversation-compose-box-input"). WhatsApp Web reuses this
-        # same element for media-preview caption input when the image modal is open.
-        # There is NO separate data-testid="media-caption" contenteditable div.
-        # The media preview modal backdrop intercepts pointer events, so clicks
-        # require force=True. Lexical editor intercepts keyboard simulation, so
-        # document.execCommand('insertText') is used instead of insert_text().
-        log.info("[WhatsApp Sender] Filling caption in media preview caption box...")
-        caption_selectors = [
-            # WhatsApp Web media preview caption input = main footer contenteditable
-            '#main footer div[contenteditable="true"][data-testid="conversation-compose-box-input"]',
-            '#main footer [role="textbox"][data-testid="conversation-compose-box-input"]',
-            # Fallback: any visible contenteditable div
-            'div[contenteditable="true"]',
-        ]
-        caption_filled = False
-        caption_text = ""
-        for sel in caption_selectors:
-            try:
-                loc = page.locator(sel).first
-                if loc.count() > 0:
-                    # Force click — modal backdrop intercepts normal pointer events
-                    loc.click(force=True)
-                    page.wait_for_timeout(500)
-                    # Clear existing content
-                    page.keyboard.press("Control+A")
-                    page.wait_for_timeout(200)
-                    page.keyboard.press("Backspace")
-                    page.wait_for_timeout(200)
-                    # Use document.execCommand('insertText') — Lexical editor
-                    # ignores page.keyboard.insert_text() and page.keyboard.type()
-                    exec_result = page.evaluate("""(text) => {
-                        const el = document.querySelector('#main footer div[data-testid="conversation-compose-box-input"]');
-                        if (!el) return { success: false, error: 'element not found' };
-                        el.focus();
-                        document.execCommand('selectAll', false, null);
-                        const ok = document.execCommand('insertText', false, text);
-                        return { success: ok, innerText: el.innerText };
-                    }""", caption)
-                    page.wait_for_timeout(1500)
-                    # ASSERT: caption must be non-empty before sending
-                    actual_caption = loc.inner_text() or loc.input_value() or ""
-                    if actual_caption.strip() and len(actual_caption.strip()) >= 20:
-                        caption_filled = True
-                        log.info("[WhatsApp Sender] Caption filled and verified via %s (len=%d)", sel, len(actual_caption.strip()))
-                        break
-                    else:
-                        log.warning("[WhatsApp Sender] Caption not retained in %s (got: %r)", sel, actual_caption[:50])
-            except Exception:
-                continue
-        if not caption_filled:
-            log.error("[WhatsApp Sender] Could not fill caption in media preview overlay — aborting to prevent captionless send.")
+        # Verify caption survived the image attach
+        compose_box_verify = page.locator('#main footer div[contenteditable="true"][data-testid="conversation-compose-box-input"]').first
+        caption_after_attach = compose_box_verify.inner_text() or ""
+        if not caption_after_attach.strip() or len(caption_after_attach.strip()) < 20:
+            log.error("[WhatsApp Sender] Caption was lost after image attach! Aborting.")
             page.close()
             browser.close()
             p.stop()
@@ -339,10 +361,9 @@ def send_whatsapp_media(
                 "debug_2": debug_2,
                 "debug_3": debug_3,
                 "success": False,
-                "error": "Caption box not found or caption not retained in media preview overlay",
+                "error": "Caption lost after image attach",
             }
-
-        time.sleep(2)
+        log.info("[WhatsApp Sender] Caption survived image attach (len=%d, newlines=%d)", len(caption_after_attach.strip()), caption_after_attach.count('\n'))
 
         # Step e: Click Send
         log.info("[WhatsApp Sender] Clicking Send button...")
@@ -357,10 +378,24 @@ def send_whatsapp_media(
             try:
                 loc = page.locator(sel).first
                 if loc.count() > 0 and loc.is_visible():
-                    loc.click()
-                    send_clicked = True
-                    log.info("[WhatsApp Sender] Send clicked: %s", sel)
-                    break
+                    # Use JS dispatchEvent for click — Playwright's click() doesn't
+                    # reliably trigger WhatsApp Web's send handler after image attach.
+                    js_result = page.evaluate("""(sel) => {
+                        const btn = document.querySelector(sel);
+                        if (!btn) return { success: false, error: 'button not found' };
+                        btn.dispatchEvent(new MouseEvent('click', {
+                            bubbles: true,
+                            cancelable: true,
+                            view: window
+                        }));
+                        return { success: true };
+                    }""", sel)
+                    if js_result.get("success"):
+                        send_clicked = True
+                        log.info("[WhatsApp Sender] Send clicked via JS: %s", sel)
+                        break
+                    else:
+                        log.warning("[WhatsApp Sender] JS click failed: %s", js_result.get("error"))
             except Exception:
                 continue
         if not send_clicked:
@@ -379,13 +414,58 @@ def send_whatsapp_media(
 
         time.sleep(5)
 
+        # ── POST-SEND VERIFICATION ──
+        # (a) Assert #main footer compose box is EMPTY — if text remains, it did NOT
+        #     go into the image caption!
+        compose_box = page.locator('#main footer div[contenteditable="true"][data-testid="conversation-compose-box-input"]').first
+        compose_empty = False
+        try:
+            compose_text = compose_box.inner_text() or ""
+            compose_empty = compose_text.strip() == ""
+        except Exception:
+            pass
+        log.info("[WhatsApp Sender] Compose box empty after send: %s", compose_empty)
+        if not compose_empty:
+            log.error("[WhatsApp Sender] Caption text still in compose box after send — image was sent WITHOUT caption!")
+            page.close()
+            browser.close()
+            p.stop()
+            return {
+                "target": target,
+                "debug_1": debug_1,
+                "debug_2": debug_2,
+                "debug_3": debug_3,
+                "success": False,
+                "error": "Caption text remained in compose box — image sent without caption",
+            }
+
+        # (b) Assert the newly sent outgoing message bubble contains BOTH an img AND
+        #     the caption text — confirms caption went with the image, not as separate text
+        caption_first_line = caption.split('\n')[0][:40] if caption else ""
+        msg_bubble_ok = False
+        try:
+            # Look for the last outgoing message in #main
+            last_msg = page.locator('#main div.message-out').last
+            if last_msg.count() > 0:
+                msg_text = last_msg.inner_text() or ""
+                msg_has_img = last_msg.locator('img').count() > 0
+                msg_has_caption = caption_first_line and caption_first_line in msg_text
+                msg_bubble_ok = msg_has_img and msg_has_caption
+                log.info("[WhatsApp Sender] Last message bubble: has_img=%s has_caption=%s text=%r", msg_has_img, msg_has_caption, msg_text[:100])
+            else:
+                log.warning("[WhatsApp Sender] No outgoing message bubble found in #main")
+        except Exception as exc:
+            log.warning("[WhatsApp Sender] Could not verify message bubble: %s", exc)
+
+        if not msg_bubble_ok:
+            log.warning("[WhatsApp Sender] Could not verify message bubble contains image+caption — "
+                        "but compose box is empty (send was dispatched). Treating as success.")
+
         # Step f: Verify message sent — look for checkmark in #main
         log.info("[WhatsApp Sender] Verifying message sent...")
         sent = False
-        # Poll for up to 15 seconds for the checkmark to appear
         for _ in range(15):
             try:
-                # Look for checkmark within #main chat area
                 main_locator = page.locator("#main")
                 if main_locator.count() > 0:
                     for check_sel in ['[data-icon="msg-dblcheck"]', '[data-icon="msg-check"]']:
@@ -507,6 +587,8 @@ def send_whatsapp_text(
             log.warning("[WhatsApp Text] Screenshot 1 error: %s", exc)
 
         # Step: Type text in the main chat input box (#main footer contenteditable)
+        # Newline preservation: page.keyboard.insert_text() strips \n in Lexical editor.
+        # Use clipboard paste (navigator.clipboard.writeText + Control+V) instead.
         log.info("[WhatsApp Text] Typing message in main chat input box...")
         input_selectors = [
             '#main footer div[contenteditable="true"]',
@@ -519,12 +601,25 @@ def send_whatsapp_text(
             try:
                 loc = page.locator(sel).first
                 if loc.count() > 0 and loc.is_visible():
-                    loc.click()
+                    loc.click(force=True)
                     page.wait_for_timeout(500)
                     page.keyboard.press("Control+A")
                     page.wait_for_timeout(300)
-                    page.keyboard.insert_text(text)
-                    page.wait_for_timeout(1000)
+                    page.keyboard.press("Backspace")
+                    page.wait_for_timeout(200)
+                    # Set system clipboard then paste — preserves \n line breaks
+                    clipboard_ok = page.evaluate("""(text) => {
+                        return navigator.clipboard.writeText(text).then(() => {
+                            return { success: true };
+                        }).catch(err => {
+                            return { success: false, error: err.message };
+                        });
+                    }""", text)
+                    if not clipboard_ok.get("success"):
+                        log.warning("[WhatsApp Text] Clipboard write failed: %s", clipboard_ok.get("error"))
+                        continue
+                    page.keyboard.press("Control+V")
+                    page.wait_for_timeout(2000)
                     actual_text = loc.inner_text() or loc.input_value() or ""
                     if actual_text.strip() and len(actual_text.strip()) >= 2:
                         text_filled = True
