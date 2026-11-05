@@ -101,10 +101,8 @@ def open_whatsapp_target(page, target: str) -> bool:
         log.info("[WhatsApp Sender] Navigating to phone chat: %s", url)
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
     else:
-        # Group invite code — navigate to accept?code= page and click "View group"
-        accept_url = f"https://web.whatsapp.com/accept?code={target}"
-        log.info("[WhatsApp Sender] Navigating to group accept page: %s", accept_url)
-        page.goto(accept_url, wait_until="domcontentloaded", timeout=60000)
+        # Group target: first go to main WhatsApp Web page to access #pane-side
+        page.goto("https://web.whatsapp.com/", wait_until="domcontentloaded", timeout=60000)
 
     # Wait for chat list to load
     pane_side = page.locator("#pane-side")
@@ -115,32 +113,65 @@ def open_whatsapp_target(page, target: str) -> bool:
         log.error("[WhatsApp Sender] #pane-side did not load — not logged into WhatsApp Web?")
         return False
 
-    # For group invite codes: click "View group" / "Continue" button on the accept page
+    # ── Group target: exact-match group name in #pane-side ──
     if not is_phone:
         time.sleep(3)
-        # Try common "View group" / "Continue" / "Join group" button selectors
-        view_group_selectors = [
-            'button:has-text("View group")',
-            'button:has-text("Continue")',
-            'button:has-text("Join group")',
-            'a:has-text("View group")',
-            'a:has-text("Continue")',
-            '[data-testid="view_group"]',
-            '[data-testid="continue"]',
-        ]
+        group_name = target  # e.g. "సమర్ధ వాస్తు"
+
+        # First try: find exact match in #pane-side chat rows
         group_opened = False
-        for sel in view_group_selectors:
-            try:
-                loc = page.locator(sel).first
-                if loc.count() > 0 and loc.is_visible():
-                    loc.click()
-                    log.info("[WhatsApp Sender] Clicked group button: %s", sel)
-                    group_opened = True
-                    break
-            except Exception:
-                continue
+        try:
+            # Get all chat rows with span[title]
+            rows = page.locator("#pane-side div[role='row']").all()
+            for row in rows:
+                try:
+                    span = row.locator("span[title]").first
+                    if span.count() == 0:
+                        continue
+                    title = span.get_attribute("title") or ""
+                    # EXACT match: trimmed title equals target, EXCLUDE titles ending in " U"
+                    title_stripped = title.strip()
+                    if title_stripped == group_name and not title_stripped.endswith(" U"):
+                        row.click()
+                        log.info("[WhatsApp Sender] Opened exact group match: %r", title)
+                        group_opened = True
+                        break
+                    else:
+                        log.debug("[WhatsApp Sender] Skipped chat row: %r (exact_match=%s)", title, title_stripped == group_name)
+                except Exception:
+                    continue
+        except Exception as exc:
+            log.warning("[WhatsApp Sender] Error scanning #pane-side rows: %s", exc)
+
+        # Second try: if not found in #pane-side, navigate to accept?code= and join
         if not group_opened:
-            log.warning("[WhatsApp Sender] No 'View group' button found — group may already be in chat list.")
+            accept_url = f"https://web.whatsapp.com/accept?code={target}"
+            log.info("[WhatsApp Sender] Group not found in chat list, navigating to accept page: %s", accept_url)
+            page.goto(accept_url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(5000)
+
+            # Try common "View group" / "Continue" / "Join group" button selectors
+            view_group_selectors = [
+                'button:has-text("View group")',
+                'button:has-text("Continue")',
+                'button:has-text("Join group")',
+                'a:has-text("View group")',
+                'a:has-text("Continue")',
+                '[data-testid="view_group"]',
+                '[data-testid="continue"]',
+            ]
+            for sel in view_group_selectors:
+                try:
+                    loc = page.locator(sel).first
+                    if loc.count() > 0 and loc.is_visible():
+                        loc.click()
+                        log.info("[WhatsApp Sender] Clicked group button: %s", sel)
+                        group_opened = True
+                        break
+                except Exception:
+                    continue
+            if not group_opened:
+                log.warning("[WhatsApp Sender] No 'View group' button found — group may already be in chat list.")
 
     # For phone numbers, WhatsApp may auto-open the chat or show "Continue to Chat"
     if is_phone:
@@ -332,8 +363,15 @@ def send_whatsapp_media(
         time.sleep(2)
 
         # Step d: Upload image via input[type="file"]
+        # CRITICAL: Use Photos & Videos input (accept*="video/mp4"), NOT Sticker creator input.
+        # WhatsApp Web has multiple file inputs: Sticker creator (accept="image/*" webp),
+        # Documents (accept="*"), and Photos & Videos (accept="image/*,video/mp4,video/3gpp,video/quicktime").
+        # Sending to Sticker input produces a sticker instead of photo+caption.
         log.info("[WhatsApp Sender] Uploading image: %s", img_path)
-        file_input = page.locator('input[type="file"][accept*="image"], input[type="file"]').first
+        file_input = page.locator('input[type="file"][accept*="video/mp4"], input[type="file"][accept*="image/*,video/mp4"]').first
+        if file_input.count() == 0:
+            # Fallback: any image input but exclude sticker/document inputs
+            file_input = page.locator('input[type="file"][accept*="image"]').first
         file_input.wait_for(state="attached", timeout=10000)
         file_input.set_input_files(str(Path(img_path).resolve()))
         log.info("[WhatsApp Sender] Image file set.")
@@ -488,8 +526,8 @@ def send_whatsapp_media(
             log.warning("[WhatsApp Sender] Screenshot 3 error: %s", exc)
 
         page.close()
-        browser.close()
-        p.stop()
+        # Keep Chrome browser open — don't close browser/p so WhatsApp Web
+        # stays synced and warm for subsequent runs. Browser remains on port 9222 via CDP.
 
         # Send button was clicked = message dispatched. Checkmark is best-effort verification.
         if not sent:
@@ -712,8 +750,8 @@ def send_whatsapp_text(
             log.warning("[WhatsApp Text] Screenshot 3 error: %s", exc)
 
         page.close()
-        browser.close()
-        p.stop()
+        # Keep Chrome browser open — don't close browser/p so WhatsApp Web
+        # stays synced and warm for subsequent runs. Browser remains on port 9222 via CDP.
 
         if close_tab:
             try:

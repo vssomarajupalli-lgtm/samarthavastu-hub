@@ -32,10 +32,12 @@ Menakuru, Andhra Pradesh, India.
 
 ### 2.3 Task Scheduler Schedule (`SamarthaVastu_Daily_8AM`)
 Configured via `register_task.ps1` / `register_task.bat` (requires Administrator elevation):
-- **Daily trigger** starting strictly at **06:00 AM**, repeating every **1 hour** for a duration of **15 hours** (last execution check at **21:00 / 9:00 PM**).
-- **Never fires at 12:00 AM midnight** (a 16-hour repetition starting at 08:00 AM was historically corrected to 15 hours starting at 06:00 AM).
-- **Logon trigger** for the current user with a 45-second delay.
-- **Power settings:** `AllowStartIfOnBatteries = true`, `DontStopIfGoingOnBatteries = true`, `StartWhenAvailable = true`.
+- **AtLogOn trigger** for current user — runs on every boot/logon (primary trigger)
+- **Optional Daily trigger** at **06:00 AM** with **ZERO repetition** — only fires if PC stayed on overnight and is already logged in at 6 AM
+- **NEVER uses hourly repetition** — no `PT1H` / `15 hour` repetition window; no hourly polling
+- **Never fires at 12:00 AM midnight**
+- **Logon trigger** for the current user with a 45-second delay
+- **Power settings:** `AllowStartIfOnBatteries = true`, `DontStopIfGoingOnBatteries = true`, `StartWhenAvailable = true`
 
 ---
 
@@ -104,11 +106,13 @@ For all non-manual runs (`not MANUAL_RUN`):
 ### 5.2 WhatsApp Web (`whatsapp_sender.py`)
 - Connects via `connect_over_cdp("http://127.0.0.1:9222")` using the isolated profile; waits for `#pane-side`.
 - Opens target chats cleanly via DOM (`918919395559` for Personal Admin; group invite/sidebar match for Public Group `DvPDx43oel4LQQgqCsn7Tr`), confirming `#main footer` is mounted before interacting.
-- **Image + Caption Delivery:** Uploads `.jpg` via `input[type="file"][accept*="image"]`, locates the media-preview caption input and inserts full Telugu caption.
-- **CRITICAL: Caption MUST be typed BEFORE attaching image:** WhatsApp Web reuses the `#main footer` compose box (`div[data-testid="conversation-compose-box-input"]`) as the image caption input. Caption text typed into `#main footer` BEFORE attaching the image SURVIVES the attach and becomes the image caption. Caption pasted AFTER attaching the image is IGNORED by WhatsApp Web. There is NO separate media-preview dialog/modal — no `[role="dialog"]` and no `[data-animate-modal-popup]` elements appear after attaching an image. NEVER assume a separate caption box exists outside `#main footer`.
+- **Exact Group Title Matching:** When opening a group, WhatsApp Web's `#pane-side` is scanned for `span[title]` elements. The group title is matched **exactly** (trimmed, case-sensitive) — `"సమర్ధ వాస్త"` matches only `"సమర్ధ వాస్త"` and is **explicitly excluded** from matching `"సమర్ధ వాస్త urbo"` (any title ending in `" U"`). This prevents accidental delivery to a wrongly-named group.
+- **Image + Caption Delivery:** Uploads `.jpg` via `input[type="file"][accept*="video/mp4"]` — strictly the Photos & Videos input, **NOT** the Sticker creator input (`accept="image/*"` webp) which would send the image as a sticker instead of photo+caption.
+- **Caption typed BEFORE attaching image:** WhatsApp Web reuses the `#main footer` compose box (`div[data-testid="conversation-compose-box-input"]`) as the image caption input. Caption text typed into `#main footer` BEFORE attaching the image SURVIVES the attach and becomes the image caption. Caption pasted AFTER attaching the image is IGNORED by WhatsApp Web. There is NO separate media-preview dialog/modal — no `[role="dialog"]` and no `[data-animate-modal-popup]` elements appear after attaching an image. NEVER assume a separate caption box exists outside `#main footer`.
 - **Newline preservation (clipboard paste):** `page.keyboard.insert_text()` and `page.keyboard.type()` are ignored by WhatsApp Web's Lexical rich-text editor. `document.execCommand('insertText')` strips `\n` line breaks. The ONLY method that preserves `\n` line breaks is clipboard paste: `navigator.clipboard.writeText(caption)` via `page.evaluate()`, then `page.keyboard.press("Control+V")`. Caption retention is verified via `innerText` length >= 20 characters AND newline count > 0 before clicking Send.
 - **Send button click via JS:** Playwright's `locator.click()` does not reliably trigger WhatsApp Web's send handler after image attach. Use `page.evaluate()` to dispatch a `MouseEvent('click')` on `button[aria-label="Send"]` instead.
 - **Post-send verification:** After clicking Send, assert `#main footer div[contenteditable="true"]` `innerText.trim()` is EMPTY — if caption text remains in the compose box, the image was sent WITHOUT caption. Also assert the sent outgoing message bubble (`#main div.message-out`) contains both an `img` element and the caption text. If the message bubble cannot be located but the compose box is empty, treat as success (best-effort verification).
+- **Keep Chrome Open:** Chrome browser (`chrome_whatsapp_profile` on port 9222) is **NOT closed** after sending. It stays open so WhatsApp Web stays synced and warm for subsequent runs. Only the Playwright page tab is closed; the browser process remains alive.
 - Returns `False` on any failure — never logs false `[OK]`.
 - **Vertical Stacking Separator (`send_whatsapp_text`):** Sends `"📋 రేపటి వీడియో ప్రివ్యూ (Tomorrow's Scheduled Preview)"` as a standalone text bubble before Stage B's preview image so WhatsApp always stacks posters full-width vertically for easy pinch-to-zoom on mobile. Injected in `auto_publisher.py` Stage B via `dispatch_whatsapp_text()` before the poster dispatch.
 - **Return Contract (`dispatch_whatsapp_text`):** Always returns a `dict` `{"success": bool, "target": str, "tag": str, "error": str|None}` — never a raw `bool`. Callers must use `.get("success")` on the dict, not on a bool. This prevents `AttributeError: 'bool' object has no attribute 'get'` crashes on hourly Task Scheduler retries.
