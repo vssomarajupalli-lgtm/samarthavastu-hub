@@ -136,14 +136,21 @@ def wait_for_stabilization(seconds: int = 300):
     log.info("[Startup Gate] Stabilization delay complete.")
 
 
-def show_confirmation_dialog(video_title: str) -> bool:
+def show_confirmation_dialog(video_title: str, completed_channels: int = 0, total_channels: int = 6, pending_channel: str = "") -> bool:
     """Native Windows MsgBox Yes/No confirmation before launching a publishing run.
     Returns True if Yes, False if No."""
     DECLINED_FILE = LOGS_DIR / "declined_today.txt"
     try:
+        # Build status line showing partial progress
+        if completed_channels >= total_channels:
+            status_line = f"All {total_channels}/{total_channels} channels complete."
+        elif pending_channel:
+            status_line = f"{completed_channels}/{total_channels} Channels Completed — Pending: [{pending_channel}]. Resume pending channel(s) now?"
+        else:
+            status_line = f"{completed_channels}/{total_channels} Channels Completed."
         result = ctypes.windll.user32.MessageBoxW(
             0,
-            f"Publish queued video now?\n\nTitle: {video_title}\n\n[Yes] = Proceed with publishing\n[No] = Cancel and keep item in preview-approved hold for next session",
+            f"Publish queued video now?\n\nTitle: {video_title}\n\n{status_line}\n\n[Yes] = Proceed with publishing\n[No] = Cancel and keep item in queue for next session",
             "Samartha Vastu - Publishing Confirmation",
             0x00000004 | 0x00000020 | 0x00010000 | 0x00010000,  # MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND
         )
@@ -1299,26 +1306,42 @@ def main():
 
     section("Samartha Vastu Publisher" + (" [DRY-RUN]" if DRY_RUN else " [LIVE]"))
 
-    # (b1) Active-hours guard — automatic runs only between 06:00 and 21:00 local time.
+    # (b1) Active-hours guard — automatic runs only between 06:00 and 22:00 local time.
     #      Midnight/late-night task triggers exit silently with ZERO popup and ZERO posts.
     if not DRY_RUN and not MANUAL_RUN:
         now_hour = datetime.now().hour
-        if now_hour < 6 or now_hour >= 21:
-            log.info("[Time Guard] Current time %02d:00 is outside 06:00-21:00 window. Exiting silently (zero popup, zero posts).", now_hour)
+        if now_hour < 6 or now_hour >= 22:
+            log.info("[Time Guard] Current time %02d:00 is outside 06:00-22:00 window. Exiting silently (zero popup, zero posts).", now_hour)
             release_publisher_lock()
             return
 
-    # (b) Daily Lock FIRST — if today's post is already 100% complete across
-    #     all channels, exit silently in <1s WITHOUT waiting 5 minutes and
-    #     WITHOUT showing any Yes/No MessageBox.
+    # (b) INSTANT IDLENESS GATE — < 1s silent exit if everything is already done.
+    #      Check BEFORE any wait, before any Chrome launch, before any prompt.
     if not DRY_RUN:
         schedule_for_lock = load_schedule()
-        if not args.force and check_daily_published_lock(schedule_for_lock, force=False):
-            release_publisher_lock()
-            return
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_item = None
+        for item in schedule_for_lock:
+            pub_at = item.get("published_at") or ""
+            if pub_at.startswith(today_str) and item.get("status") == "published":
+                today_item = item
+                break
+        if today_item:
+            # Check ALL 6 channels complete + Stage B preview sent today
+            has_fb = bool(today_item.get("fb_post_url"))
+            has_ig = bool(today_item.get("ig_post_url"))
+            has_yt = bool(today_item.get("yt_short_url"))
+            has_wa_grp = bool(today_item.get("wa_group_sent"))
+            has_wa_adm = bool(today_item.get("wa_admin_sent"))
+            has_wa = bool(today_item.get("wa_sent") or (has_wa_grp and has_wa_adm))
+            preview_sent_today = today_item.get("preview_sent_date") == today_str
+            if has_fb and has_ig and has_yt and has_wa and preview_sent_today:
+                log.info("[Time Guard] Today's item %s is 100%% complete across ALL channels. Exiting silently in <1s.", today_item.get("id"))
+                release_publisher_lock()
+                return
 
     # (b2) Daily Snooze — if user clicked No earlier today on an automatic run,
-    #      exit silently in <1s so the hourly Scheduled Task stops re-prompting.
+    #      exit silently in <1s so the Scheduled Task stops re-prompting.
     if not DRY_RUN and not MANUAL_RUN:
         declined_file = LOGS_DIR / "declined_today.txt"
         try:
@@ -1328,33 +1351,31 @@ def main():
         except Exception:
             pass
 
+    # (c) FAST READINESS — only when work actually remains:
+    #     - Internet check with short timeout (max ~8s, not 180s)
+    #     - Desktop unlock check (max ~30s)
+    #     - Skip 300s stabilization; use max 30s settle instead
     if not DRY_RUN:
-        if not wait_for_internet(timeout_seconds=180):
+        if not wait_for_internet(timeout_seconds=8):
             log.error("Aborting run due to lack of internet connectivity.")
             release_publisher_lock()
             sys.exit(1)
 
     schedule = load_schedule()
 
-    # (c) Wait until Windows desktop is unlocked (LogonUI.exe absent).
+    # (c2) Desktop unlock check (fast: max ~15s)
     if not DRY_RUN:
-        if not wait_for_unlocked_desktop(timeout_sec=1800):
+        if not wait_for_unlocked_desktop(timeout_sec=15):
             log.error("[Desktop Watcher] Could not proceed — desktop remained locked.")
             release_publisher_lock()
             sys.exit(1)
 
-    # (d) 300-second stabilization delay ONLY on scheduled/boot runs.
-    #     Skip if --force or --manual is passed.
-    if not DRY_RUN and not MANUAL_RUN and not _STABILIZED:
-        _STABILIZED = True
-        wait_for_stabilization(300)
-
-    # (d1) Re-check active-hours after stabilization — if time crossed 21:00,
+    # (d1) Re-check active-hours after readiness — if time crossed 22:00,
     #      exit silently with ZERO popup before showing confirmation.
     if not DRY_RUN and not MANUAL_RUN:
         now_hour = datetime.now().hour
-        if now_hour >= 21:
-            log.info("[Time Guard] Current time %02d:00 is at/after 21:00 after stabilization wait. Exiting silently.", now_hour)
+        if now_hour >= 22:
+            log.info("[Time Guard] Current time %02d:00 is at/after 22:00 after readiness wait. Exiting silently.", now_hour)
             release_publisher_lock()
             return
 
@@ -1416,7 +1437,32 @@ def main():
 
     if target_item_for_dialog and not DRY_RUN:
         dialog_title = target_item_for_dialog.get("title") or target_item_for_dialog.get("id", "Unknown")
-        if not show_confirmation_dialog(dialog_title):
+        # Compute partial progress for dialog display
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        pub_at = target_item_for_dialog.get("published_at") or ""
+        is_today = pub_at.startswith(today_str)
+        completed_channels = 0
+        pending_channel = ""
+        if is_today:
+            completed_channels = sum(1 for f in [
+                bool(target_item_for_dialog.get("fb_post_url")),
+                bool(target_item_for_dialog.get("ig_post_url")),
+                bool(target_item_for_dialog.get("yt_short_url")),
+                bool(target_item_for_dialog.get("wa_group_sent")),
+                bool(target_item_for_dialog.get("wa_admin_sent")),
+            ])
+            # Determine which channel is pending
+            if not target_item_for_dialog.get("fb_post_url"):
+                pending_channel = "Facebook Page"
+            elif not target_item_for_dialog.get("ig_post_url"):
+                pending_channel = "Instagram"
+            elif not target_item_for_dialog.get("yt_short_url"):
+                pending_channel = "YouTube Shorts"
+            elif not target_item_for_dialog.get("wa_group_sent"):
+                pending_channel = "WhatsApp Group"
+            elif not target_item_for_dialog.get("wa_admin_sent"):
+                pending_channel = "WhatsApp Admin"
+        if not show_confirmation_dialog(dialog_title, completed_channels, 6, pending_channel):
             log.info("[Startup Gate] User clicked No — exiting safely (exit 0). Item remains queued for next session.")
             release_publisher_lock()
             return

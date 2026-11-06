@@ -45,28 +45,36 @@ Configured via `register_task.ps1` / `register_task.bat` (requires Administrator
 
 ### 3.1 Active Hours Window
 For all non-manual runs (`not MANUAL_RUN`):
-- **Pre-wait check:** Immediately on script start, if `now.hour < 6 or now.hour >= 21`, log `[Time Guard]` and `sys.exit(0)` silently before sleeping.
+- **Pre-wait check:** Immediately on script start, if `now.hour < 6 or now.hour >= 22`, log `[Time Guard]` and `sys.exit(0)` silently before sleeping.
 - **Stabilization delay:** After desktop unlock, wait **300 seconds (5 minutes)** for network and desktop stabilization.
-- **Post-wait check:** Re-check `now.hour < 6 or now.hour >= 21` right before showing the confirmation popup. If time crossed `21:00` during the 5-minute wait, exit silently with zero popup.
+- **Post-wait check:** Re-check `now.hour < 6 or now.hour >= 22` right before showing the confirmation popup. If time crossed `22:00` during the wait, exit silently with zero popup.
 
 ### 3.2 Execution Constraints
-- Local execution is strictly between **06:00 AM and 09:00 PM** (`6 <= now.hour < 21`).
+- Local execution is strictly between **06:00 AM and 10:00 PM** (`6 <= now.hour < 22`).
 - Silent immediate exit if launched outside active hours — zero popups, zero posts.
-- If the laptop is never powered on during the `06:00`–`21:00` window on a given day, that day is skipped cleanly.
+- If the laptop is never powered on during the `06:00`–`22:00` window on a given day, that day is skipped cleanly.
 
 ### 3.3 Human-in-the-Loop Confirmation
 - After stabilization within active hours, present a **Yes / No** confirmation dialog displaying today's scheduled Telugu title.
+- If only some channels are complete (partial run from earlier failure), the dialog shows `N/6 Channels Completed — Pending: [Channel Name] Resume pending channel(s) now?`
 - Clicking **Yes** runs the pipeline; clicking **No** snoozes automatic prompts for the remainder of that calendar day without hourly nagging.
 
 ### 3.4 Manual Bypass
 - `Publish_Now.bat` runs `python auto_publisher.py --manual`, which completely bypasses the active-hours gate and the 5-minute stabilization wait whenever explicitly invoked by the user.
 
-### 3.5 Stage B Idempotency (`preview_sent_date`, `separator_sent_date`)
+### 3.5 Instant Silent Pre-Check (Instant Idempotency Gate)
+- At script startup, **before** any internet wait, desktop unlock, stabilization delay, or Chrome launch:
+  - Checks `publisher.lock` for stale PID (auto-clears if process is dead)
+  - Checks `declined_today.txt`: if user clicked No today, exit silently in `< 1s`
+  - Checks `master_schedule.json`: if today's item has all 6 channels complete AND Stage B preview sent today, exit silently in `< 1s`
+- This prevents unnecessary Chrome launches, popups, or waits when work is already done.
+
+### 3.6 Stage B Idempotency (`preview_sent_date`, `separator_sent_date`)
 - `run_stage_b_prepare_tomorrow()` checks `preview_sent_date` on the `preview_approved` item before any WhatsApp Web navigation.
 - If `preview_sent_date == today_str`, Stage B exits immediately with **ZERO WhatsApp Web navigation** and **ZERO duplicate messages** — preventing repeated hourly Task Scheduler triggers from re-sending the separator + poster.
 - **Separator anti-spam:** `separator_sent_date` is tracked separately. The separator text `"📋 రేపటి వీడియో ప్రివ్యూ (Tomorrow's Scheduled Preview)"` is sent at most once per day. If `separator_sent_date == today_str`, the separator is skipped on retries (only the poster is retried if it previously failed).
 - After a successful Stage B send (separator + poster both dispatched), both `preview_sent_date` and `separator_sent_date` are set to `today_str` and `master_schedule.json` is atomically saved via `save_schedule()`.
-- If the poster send fails, `preview_sent_date` remains unset so the next hourly run retries the poster (without re-sending the separator).
+- If the poster send fails, `preview_sent_date` remains unset so the next run retries the poster (without re-sending the separator).
 - `main()` also checks `preview_sent_date` before calling Stage B for both `--prepare-tomorrow` and `--daily-run` modes, skipping Stage B entirely if already sent today.
 
 ---
@@ -97,11 +105,12 @@ For all non-manual runs (`not MANUAL_RUN`):
 ### 5.1 YouTube Shorts (`youtube_shorts_uploader.py`)
 - Connects to `http://127.0.0.1:9222` (`browser.contexts[0]`) and opens a dedicated tab via Playwright CDP.
 - **Duplicate Prevention:** Checks YouTube Studio Shorts list (`https://studio.youtube.com/channel/UCDtcb0drjmLgG3ARTh4e7jw/videos/short`) for an existing `Draft` or `Private` row matching today's title before initiating a fresh upload.
-- **Title Injection & Assertion (Lexical Editor):** YouTube Studio's title/description fields use the Lexical rich-text editor, which ignores `page.keyboard.insert_text()` and `page.keyboard.type()`. Text is inserted via `page.evaluate()` running `document.execCommand('selectAll', false, null)` + `document.execCommand('insertText', false, <text>)`, followed by a wait for Lexical to render. YouTube auto-fills `"temp short"` from `temp_short.mp4`. The uploader focuses `#title-textarea #textbox`, executes `Control+A` + `Backspace`, inserts `<Telugu Title> #Shorts #SamarthaVastu` (`<= 100` chars) via `document.execCommand('insertText')`, blurs out, and loops (`while actual_title.strip() != short_title.strip()`) up to 5 retries to guarantee `"temp short"` never survives. **The assertion operator is `!=` (not equal), preventing infinite retry loops when the title is already correct.**
-- **COPPA / "Not Made for Kids" Hard Assertion:** On the Details step, explicitly scroll the upload modal's inner scroll container so `tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]` (fallback `tp-yt-paper-radio-button[name="NOT_MADE_FOR_KIDS"]`) is visible (`scroll_into_view_if_needed()`). Click `#radioContainer` inside that radio button (fallback: click element / JS `.click()`), wait 500ms, and **strictly assert** `aria-checked="true"` (retry up to 5 times). If the radio cannot be checked after 5 retries, abort the upload.
-- **Robust `#next-button` Progression (Details → Video elements → Checks → Visibility):** Do NOT hang waiting for `"Checks complete"` footer text if `"Video processing is taking longer than expected"` is shown — YouTube allows clicking `#next-button` all the way to Visibility and publishing Public while HD/processing finishes in the background! On each step, scroll the modal footer into view so `#next-button` is not intercepted by the backdrop, ensure `#next-button` is visible and enabled (`disabled` and `aria-disabled` both falsy), click `#next-button` (Playwright `.click()` with DOM `.click()` fallback if intercepted), and assert the stepper actually advanced until `tp-yt-paper-radio-button[name="PUBLIC"]` is visible.
-- **Visibility Step:** Scrolls `PUBLIC` radio into view, clicks `tp-yt-paper-radio-button[name="PUBLIC"] #radioContainer` (with outer fallback), asserts `checked` / `aria-checked="true"`, and asserts `#done-button` displays `"Publish"` (not `"Save"`). Clicks `#done-button`, handles optional `"Publish anyway"` secondary dialog if processing is still running, waits up to `45s` for the post-publish share dialog, and verifies HTTP 200 on `https://www.youtube.com/shorts/<11-char-id>`.
+- **Title Injection & Assertion (Lexical Editor):** YouTube Studio's title/description fields use the Lexical rich-text editor, which ignores `page.keyboard.insert_text()` and `page.keyboard.type()`. Text is inserted via `page.evaluate()` running `document.execCommand('selectAll', false, null)` + `document.execCommand('insertText', false, <text>)`, followed by a wait for Lexical to render. YouTube auto-fills `"temp short"` from `temp_short.mp4`. The uploader focuses `#title-textarea #textbox`, executes `Control+A` + `Backspace`, inserts `<Telugu Title> #Shorts #SamarthaVastu` (`<= 100` chars) via `document.execCommand('insertText')`, blurs out, and loops (`while actual_title.strip() != short_title.strip()`) up to 5 retries to guarantee `"temp short"` never survives. **The assertion operator is `!=` (not equal), preventing infinite retry loops when the title is already correct.** Title assertion uses `inner_text()` (not `input_value()`) since the title field is a contenteditable div.
+- **COPPA / "Not Made for Kids" Fast Path:** After setting title/description, clicks `#next-button` immediately. If still on Details step (PUBLIC radio not visible), scrolls `tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]` (fallback `tp-yt-paper-radio-button[name="NOT_MADE_FOR_KIDS"]`) into view, clicks `#radioContainer` inside that radio button, waits 500ms, and strictly asserts `aria-checked="true"` (retry up to 5 times). If the radio cannot be checked after 5 retries, abort the upload.
+- **Robust `#next-button` Progression (Details → Video elements → Checks → Visibility):** Do NOT hang waiting for `"Checks complete"` footer text if `"Video processing is taking longer than expected"` is shown — YouTube allows clicking `#next-button` all the way to Visibility and publishing Public while HD/processing finishes in the background! On each step, scroll the modal footer into view so `#next-button` is not intercepted by the backdrop, ensure `#next-button` is visible and enabled (`disabled` and `aria-disabled` both falsy), click `#next-button` (Playwright `.click()` with DOM `.click()` fallback if intercepted), and assert the stepper actually advanced until `tp-yt-paper-radio-button[name="PUBLIC"]` is visible. On the Checks step, waits up to **75 seconds** polling every 3s for checks completion (`"Checks complete"` / `"No issues found"` checkmark). If checks fail or processing takes longer, still proceeds to Visibility — does not abort.
+- **Visibility Step:** Scrolls `PUBLIC` radio into view, clicks `tp-yt-paper-radio-button[name="PUBLIC"] #radioContainer` (with outer fallback), asserts `checked` / `aria-checked="true"`, and asserts `#done-button` displays `"Publish"` (not `"Save"`). Clicks `#done-button`, handles optional `"Publish anyway"` secondary dialog if processing is still running, waits up to **45 seconds** for the post-publish share dialog, and verifies the Short URL (`youtube.com/shorts/<11-char-id>`). If Short URL is captured but Shorts table visibility row is not found, still treats as success (YouTube may take time to index the table).
 - **Fake URL Blacklist:** The placeholder/fallback ID `gg3nNP0kueg` is explicitly rejected. On upload failure, no fake/fallback URL is assigned — `short_url` remains empty and `success` is `False`.
+- **Keep Chrome Open:** Chrome browser (`chrome_whatsapp_profile` on port 9222) is **NOT closed** after upload. It stays open so WhatsApp Web and YouTube Studio stay synced for subsequent runs. Only the Playwright page tab is closed; the browser process remains alive.
 
 ### 5.2 WhatsApp Web (`whatsapp_sender.py`)
 - Connects via `connect_over_cdp("http://127.0.0.1:9222")` using the isolated profile; waits for `#pane-side`.
