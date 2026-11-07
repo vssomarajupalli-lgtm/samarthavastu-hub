@@ -126,6 +126,7 @@ def ensure_chrome_cdp() -> bool:
     log.error("[YouTube Shorts] Chrome CDP port %d did not accept connections within 10s.", CHROME_CDP_PORT)
     return False
 
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -373,7 +374,7 @@ body {{
   <div class="headline-card">
     <div class="video-title">{title}</div>
     <div class="badges">
-      <span class="svsn-badge">SVSN రాజు &nbsp;|&nbsp; MA Astrology &amp; Vastu Shastra</span>
+      <span class="svsn-badge">SVSN రాజు &nbsp;|&nbsp; MA Astrology & Vastu Shastra</span>
     </div>
   </div>
 </div>
@@ -631,7 +632,7 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
                             visibility_text = vw
                             break
                     log.info("[YouTube Shorts] Found existing draft with visibility='%s': %s", visibility_text, draft_title[:40])
-                    
+
                     edit_btn = row.locator('[aria-label="Edit"], ytcp-button:has-text("Edit"), button:has-text("Edit"), ytcp-button:has-text("Edit draft"), button:has-text("Edit draft")').first
                     if edit_btn.count() > 0 and edit_btn.is_visible():
                         edit_btn.click()
@@ -745,11 +746,11 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             # was already set correctly and we skip it entirely.
             kids_radio = page.locator('tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"], tp-yt-paper-radio-button[name="NOT_MADE_FOR_KIDS"]').first
             kids_radio_visible = kids_radio.count() > 0 and kids_radio.is_visible()
-            
+
             # Try clicking Next first — if we advance past Details, kids radio was already set
             next_btn = page.locator('#next-button').first
             next_btn_visible = next_btn.count() > 0 and next_btn.is_visible()
-            
+
             if next_btn_visible:
                 # Check if we're still on Details step by looking for PUBLIC radio
                 # (which only appears on Visibility step, not Details)
@@ -980,7 +981,7 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
                     short_id = short_url.split("/shorts/")[-1].split("?")[0]
                     parent_video_id = item.get("video_id", "")
                     if parent_video_id:
-                        related_ok = set_related_video(page, short_id, parent_video_id)
+                        related_ok = set_related_video(page, short_id, item.get("title", ""), parent_video_id)
                         if related_ok:
                             log.info("[YouTube Shorts] Related video linked successfully: %s -> %s", short_id, parent_video_id)
                         else:
@@ -1027,8 +1028,9 @@ def set_related_video(page, short_id: str, parent_title: str, parent_video_id: s
     feature in YouTube Studio.
 
     Navigates to https://studio.youtube.com/video/{short_id}/edit, finds the
-    related video picker in the right-hand sidebar, searches for parent_video_id,
-    selects it, saves, and asserts the change persisted.
+    related video picker in the right-hand sidebar (ytcp-shorts-content-links-picker),
+    searches for parent_title[:25] (Telugu title prefix), selects the matching
+    long-form video card (ensuring it is not the Short itself), and clicks #save.
 
     Returns True if the related video was successfully linked (or was already
     linked to the same video), False otherwise. Never crashes the calling flow —
@@ -1048,10 +1050,10 @@ def set_related_video(page, short_id: str, parent_title: str, parent_video_id: s
 
         log.info("[YouTube Shorts] Media editor sidepanel found on edit page")
 
-        # Find the related video picker button — ytcp-shorts-content-links-picker
+        # Find the related video picker button — ytcp-shorts-content-links-picker (Shorts-specific)
         related_picker = page.locator('ytcp-shorts-content-links-picker').first
         if related_picker.count() == 0:
-            log.warning("[YouTube Shorts] Related video picker button not found in sidebar")
+            log.warning("[YouTube Shorts] Related video picker button (ytcp-shorts-content-links-picker) not found in sidebar")
             return False
 
         log.info("[YouTube Shorts] Related video picker button found")
@@ -1066,12 +1068,12 @@ def set_related_video(page, short_id: str, parent_title: str, parent_video_id: s
                 return True
 
         # Click the related video picker button using JS click (Playwright click()
-        # is intercepted by modal overlay)
-        page.evaluate("""() => {
-            const btn = document.querySelector('ytcp-shorts-content-links-picker');
-            if (btn) btn.click();
-        }""")
-        page.wait_for_timeout(3000)
+                # is intercepted by modal overlay)
+                page.evaluate("""() => {
+                    const btn = document.querySelector('ytcp-shorts-content-links-picker');
+                    if (btn) btn.click();
+                }""")
+                page.wait_for_timeout(5000)
 
         # Look for the media picker dialog
         picker_dialog = page.locator(
@@ -1086,7 +1088,7 @@ def set_related_video(page, short_id: str, parent_title: str, parent_video_id: s
 
         log.info("[YouTube Shorts] Media picker dialog opened")
 
-        # Search for the parent video by video ID
+        # Search for the parent video by title prefix (Telugu) — YouTube Studio search works on title, not video ID
         search_input = page.locator(
             'input[placeholder*="Search" i], '
             'input[aria-label*="Search" i], '
@@ -1101,12 +1103,12 @@ def set_related_video(page, short_id: str, parent_title: str, parent_video_id: s
             page.wait_for_timeout(300)
             page.keyboard.insert_text(parent_title[:25])
             page.wait_for_timeout(3000)
-            log.info("[YouTube Shorts] Searched for video ID: %s", parent_video_id)
+            log.info("[YouTube Shorts] Searched for title prefix: %s", parent_title[:25])
         else:
             log.warning("[YouTube Shorts] Search input not found in picker dialog")
             return False
 
-        # Select the matching parent video row
+        # Select the matching parent video row — match by video_id to ensure correct long-form video
         video_row = page.locator(
             f'ytcp-video-row:has-text("{parent_video_id}"), '
             f'tr:has-text("{parent_video_id}"), '
@@ -1115,180 +1117,14 @@ def set_related_video(page, short_id: str, parent_title: str, parent_video_id: s
 
         if video_row.count() == 0:
             log.warning("[YouTube Shorts] Video %s not found in picker results", parent_video_id)
-            return False
-
-        video_row.click()
-        page.wait_for_timeout(2000)
-        log.info("[YouTube Shorts] Selected video %s in picker", parent_video_id)
-
-        # Click the Save button
-        save_btn = page.locator(
-            '#save-button, '
-            'button:has-text("Save"), '
-            '[aria-label="Save"], '
-            'ytcp-button:has-text("Save")'
-        ).first
-
-        if save_btn.count() == 0:
-            log.warning("[YouTube Shorts] Save button not found in picker dialog")
-            return False
-
-        save_btn.click()
-        page.wait_for_timeout(3000)
-
-        # Assert save succeeded: look for toast or Save button becoming disabled
-        save_btn_again = page.locator(
-            '#save-button, '
-            'button:has-text("Save"), '
-            '[aria-label="Save"], '
-            'ytcp-button:has-text("Save")'
-        ).first
-
-        if save_btn_again.count() > 0:
-            disabled = save_btn_again.get_attribute("checked") or ""
-            aria_disabled = save_btn_again.get_attribute("aria-checked") or ""
-            if "disabled" in disabled.lower() or aria_disabled.lower() == "true":
-                log.info("[YouTube Shorts] Related video saved successfully (Save button disabled after save)")
-                return True
-
-        # Alternative: look for a toast notification
-        toast = page.locator(
-            '[data-testid="snackbar-container"], '
-            'ytcp-snackbar-container, '
-            '[aria-label*="saved" i], '
-            '[aria-label*="Saved" i]'
-        ).first
-        if toast.count() > 0:
-            toast_text = toast.inner_text() or ""
-            if "saved" in toast_text.lower():
-                log.info("[YouTube Shorts] Related video saved successfully (toast confirmation)")
-                return True
-
-        log.warning("[YouTube Shorts] Could not confirm related video save via UI state")
-        return False
-
-    except Exception as exc:
-        log.error("[YouTube Shorts] Related video setting failed: %s", exc)
-        return False
-
-
-def _extract_short_url(page) -> str | None:
-    """Extract a verified youtube.com/shorts/<11-char-id> URL from the current page."""
-    try:
-        for link in page.locator('a').all():
-            href = link.get_attribute("href") or ""
-            if "youtube.com/shorts/" in href or "youtu.be/" in href:
-                url = href.strip()
-                if "youtu.be/" in url:
-                    vid_part = url.split("youtu.be/")[-1].split("?")[0]
-                    url = f"https://www.youtube.com/shorts/{vid_part}"
-                # Verify it's an 11-char short ID
-                import re
-                m = re.search(r'/shorts/([a-zA-Z0-9_-]{11})', url)
-                if m:
-                    return url
-    except Exception:
-        pass
-    return None
-
-
-def set_related_video(page, short_id: str, parent_title: str, parent_video_id: str) -> bool:
-    """
-    Link a YouTube Short to its parent full-length video via the "Related video"
-    feature in YouTube Studio.
-
-    Navigates to https://studio.youtube.com/video/{short_id}/edit, finds the
-    Related video picker in the right-hand sidebar, searches for parent_video_id,
-    selects it, saves, and asserts the change persisted.
-
-    Returns True if the related video was successfully linked (or was already
-    linked to the same video), False otherwise. Never crashes the calling flow —
-    callers should treat this as best-effort.
-    """
-    try:
-        edit_url = f"https://studio.youtube.com/video/{short_id}/edit"
-        log.info("[YouTube Shorts] Opening edit page for related video: %s", edit_url)
-        page.goto(edit_url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(5000)
-
-        # Wait for the video details page to load (right-hand sidebar with metadata editor)
-        sidepanel = page.locator('ytcp-video-metadata-editor-sidepanel')
-        if sidepanel.count() == 0:
-            log.warning("[YouTube Shorts] Related video: media editor sidepanel not found on edit page")
-            return False
-
-        log.info("[YouTube Shorts] Media editor sidepanel found on edit page")
-
-        # Look for the "Related video" picker button / chip
-        related_picker = page.locator(
-            '[data-testid="related-video-picker-button"], '
-            'button:has-text("Related video"), '
-            'button:has-text("Add related video"), '
-            '[aria-label*="Related video" i], '
-            'ytcp-related-video-picker-button'
-        ).first
-
-        if related_picker.count() == 0:
-            log.warning("[YouTube Shorts] Related video picker button not found in sidebar")
-            return False
-
-        log.info("[YouTube Shorts] Related video picker button found")
-
-        # Check if a related video is already linked
-        related_chip = page.locator('ytcp-chip, [data-testid="related-video-chip"], [aria-label*="Related video" i]').first
-        if related_chip.count() > 0:
-            chip_text = related_chip.inner_text() or ""
-            log.info("[YouTube Shorts] Related chip text: %s", chip_text[:100])
-            if parent_video_id in chip_text:
-                log.info("[YouTube Shorts] Related video already set to %s — skipping", parent_video_id)
-                return True
-
-        # Click the related video picker button
-        related_picker.click()
-        page.wait_for_timeout(3000)
-
-        # Look for the media picker dialog
-        picker_dialog = page.locator(
-            'ytcp-related-video-picker-dialog, '
-            '[data-testid="related-video-picker-dialog"], '
-            'ytcp-dialog:has-text("Related video")'
-        ).first
-
-        if picker_dialog.count() == 0:
-            log.warning("[YouTube Shorts] Related video picker dialog did not appear")
-            return False
-
-        log.info("[YouTube Shorts] Media picker dialog opened")
-
-        # Search for the parent video by video ID
-        search_input = page.locator(
-            'input[placeholder*="Search" i], '
-            'input[aria-label*="Search" i], '
-            'ytcp-text-input[placeholder*="Search" i]'
-        ).first
-
-        if search_input.count() > 0:
-            search_input.click()
-            page.wait_for_timeout(500)
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Backspace")
-            page.wait_for_timeout(300)
-            page.keyboard.insert_text(parent_title[:25])
-            page.wait_for_timeout(3000)
-            log.info("[YouTube Shorts] Searched for video ID: %s", parent_video_id)
-        else:
-            log.warning("[YouTube Shorts] Search input not found in picker dialog")
-            return False
-
-        # Select the matching parent video row
-        video_row = page.locator(
-            f'ytcp-video-row:has-text("{parent_video_id}"), '
-            f'tr:has-text("{parent_video_id}"), '
-            f'[aria-label*="{parent_video_id}"]'
-        ).first
-
-        if video_row.count() == 0:
-            log.warning("[YouTube Shorts] Video %s not found in picker results", parent_video_id)
+            # List available rows for debugging
+            rows = page.locator('ytcp-video-row').all()
+            log.info("[YouTube Shorts] Available rows in picker (%d):", len(rows))
+            for i, row in enumerate(rows[:10]):
+                try:
+                    log.info("  [%d] %s", i, row.inner_text()[:80])
+                except Exception:
+                    pass
             return False
 
         video_row.click()
@@ -1334,7 +1170,7 @@ def set_related_video(page, short_id: str, parent_title: str, parent_video_id: s
         ).first
         if toast.count() > 0:
             toast_text = toast.inner_text() or ""
-            if "saved" in toast_text.lower() or "saved" in toast_text.lower():
+            if "saved" in toast_text.lower():
                 log.info("[YouTube Shorts] Related video saved successfully (toast confirmation)")
                 return True
 
@@ -1393,4 +1229,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -48,45 +48,97 @@ log = logging.getLogger("whatsapp_sender")
 def connect_whatsapp_cdp() -> Optional[object]:
     """
     Connect to the isolated Chrome profile running on port 9222 and return
-    (browser, context, page) for WhatsApp Web automation.
+    (playwright, browser, context, page) for WhatsApp Web automation.
     Returns None if CDP is not available.
+    Hardened: terminates stale automation-profile Chrome processes, removes
+    stale SingletonLock, relaunches Chrome with --remote-debugging-port=9222,
+    and waits up to 25s for port 9222 to be ready.
     """
     import socket
+    import subprocess
     from playwright.sync_api import sync_playwright
 
-    # Quick port check
-    try:
-        with socket.create_connection(("127.0.0.1", 9222), timeout=0.5):
-            pass
-    except OSError:
-        log.info("[WhatsApp Sender] Chrome CDP port 9222 not listening. Launching Chrome with remote debugging...")
-        import subprocess
-        subprocess.Popen(
-            [
-                "chrome.exe",
-                "--remote-debugging-port=9222",
-                f"--user-data-dir={WHATSAPP_USER_DATA}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--start-minimized",
-                "about:blank",
-            ],
-            shell=True,
-            cwd=None,
-        )
-        # Wait up to 20 seconds for port 9222 to accept connections
-        for i in range(40):
-            time.sleep(0.5)
-            try:
-                with socket.create_connection(("127.0.0.1", 9222), timeout=0.5):
-                    log.info("[WhatsApp Sender] Chrome CDP port 9222 is now listening.")
-                    break
-            except OSError:
-                continue
-        else:
-            log.error("[WhatsApp Sender] Chrome CDP port 9222 did not accept connections within 20s.")
-            return None
+    def _port_ready() -> bool:
+        try:
+            with socket.create_connection(("127.0.0.1", 9222), timeout=0.5):
+                return True
+        except OSError:
+            return False
 
+    # If port already listening, connect directly
+    if _port_ready():
+        try:
+            p = sync_playwright().start()
+            browser = p.chromium.connect_over_cdp(CDP_URL, timeout=10000)
+            context = browser.contexts[0]
+            page = context.new_page()
+            log.info("[WhatsApp Sender] Connected to Chrome CDP (contexts=%d)", len(browser.contexts))
+            return p, browser, context, page
+        except Exception as exc:
+            log.warning("[WhatsApp Sender] Port ready but CDP connect failed: %s — will re-launch Chrome", exc)
+
+    # Port not ready or connect failed — self-heal: kill stale automation Chrome, remove lock, relaunch
+    log.info("[WhatsApp Sender] Self-healing Chrome CDP on port 9222...")
+
+    # Terminate ONLY chrome.exe processes bound to the automation profile
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            cmdline = proc.info.get('cmdline') or []
+            cmdline_str = " ".join(cmdline)
+            if proc.info.get('name', '').lower() == 'chrome.exe' and WHATSAPP_USER_DATA in cmdline_str:
+                log.info("[WhatsApp Sender] Terminating stale automation Chrome (PID %d) holding profile lock.", proc.info['pid'])
+                proc.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    # Wait for processes to exit and release the profile lock
+    time.sleep(2)
+
+    # Remove stale SingletonLock if present
+    singleton_lock = os.path.join(WHATSAPP_USER_DATA, "SingletonLock")
+    if os.path.exists(singleton_lock):
+        try:
+            os.remove(singleton_lock)
+            log.info("[WhatsApp Sender] Removed stale SingletonLock in automation profile.")
+        except OSError:
+            pass
+
+    # Launch Chrome with remote debugging
+    chrome_bin = "chrome.exe"
+    for candidate in [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+    ]:
+        if os.path.exists(candidate):
+            chrome_bin = candidate
+            break
+
+    log.info("[WhatsApp Sender] Launching isolated Chrome for CDP on port 9222...")
+    subprocess.Popen(
+        [
+            chrome_bin,
+            f"--user-data-dir={WHATSAPP_USER_DATA}",
+            "--remote-debugging-port=9222",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--start-minimized",
+            "about:blank",
+        ],
+        shell=True,
+    )
+
+    # Wait up to 25 seconds for port 9222 to accept connections
+    for i in range(50):
+        time.sleep(0.5)
+        if _port_ready():
+            log.info("[WhatsApp Sender] Chrome CDP port 9222 is now listening (after %.1fs).", (i + 1) * 0.5)
+            break
+    else:
+        log.error("[WhatsApp Sender] Chrome CDP port 9222 did not accept connections within 25s.")
+        return None
+
+    # Connect via CDP
     try:
         p = sync_playwright().start()
         browser = p.chromium.connect_over_cdp(CDP_URL, timeout=10000)
@@ -95,7 +147,7 @@ def connect_whatsapp_cdp() -> Optional[object]:
         log.info("[WhatsApp Sender] Connected to Chrome CDP (contexts=%d)", len(browser.contexts))
         return p, browser, context, page
     except Exception as exc:
-        log.error("[WhatsApp Sender] CDP connect failed: %s", exc)
+        log.error("[WhatsApp Sender] CDP connect failed after launch: %s", exc)
         return None
 
 
@@ -549,8 +601,12 @@ def send_whatsapp_media(
             log.warning("[WhatsApp Sender] Screenshot 3 error: %s", exc)
 
         page.close()
-        # Keep Chrome browser open — don't close browser/p so WhatsApp Web
-        # stays synced and warm for subsequent runs. Browser remains on port 9222 via CDP.
+        # Stop Playwright driver (Chrome browser stays running on port 9222 via independent subprocess)
+        try:
+            p.stop()
+        except Exception:
+            pass
+        # Keep Chrome browser open — browser remains on port 9222 via CDP.
 
         # Send button was clicked = message dispatched. Checkmark is best-effort verification.
         if not sent:
@@ -773,8 +829,12 @@ def send_whatsapp_text(
             log.warning("[WhatsApp Text] Screenshot 3 error: %s", exc)
 
         page.close()
-        # Keep Chrome browser open — don't close browser/p so WhatsApp Web
-        # stays synced and warm for subsequent runs. Browser remains on port 9222 via CDP.
+        # Stop Playwright driver (Chrome browser stays running on port 9222 via independent subprocess)
+        try:
+            p.stop()
+        except Exception:
+            pass
+        # Keep Chrome browser open — browser remains on port 9222 via CDP.
 
         if close_tab:
             try:

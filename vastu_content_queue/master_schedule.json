@@ -419,7 +419,7 @@
     "thumbnail_file": "vastu_content_queue\\thumbnails\\yt_ysQ_4Iw3TkI.jpg",
     "has_thumbnail": true,
     "has_video": false,
-    "status": "pending",
+    "status": "preview_approved",
     "scheduled_date": "2026-11-08",
     "scheduled_time": "08:00:00",
     "scheduled_at": "2026-11-08T08:00:00",
@@ -428,7 +428,9 @@
     "fb_post_url": null,
     "ig_media_id": null,
     "ig_post_url": null,
-    "wa_sent": false
+    "wa_sent": false,
+    "separator_sent_date": "2026-11-07",
+    "preview_sent_date": "2026-11-07"
   },
   {
     "id": "yt_sZcJ9hohbyA",
