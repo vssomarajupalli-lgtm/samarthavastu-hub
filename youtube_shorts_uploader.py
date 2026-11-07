@@ -1021,7 +1021,7 @@ def _extract_short_url(page) -> str | None:
     return None
 
 
-def set_related_video(page, short_id: str, parent_video_id: str) -> bool:
+def set_related_video(page, short_id: str, parent_title: str, parent_video_id: str) -> bool:
     """
     Link a YouTube Short to its parent full-length video via the "Related video"
     feature in YouTube Studio.
@@ -1099,7 +1099,7 @@ def set_related_video(page, short_id: str, parent_video_id: str) -> bool:
             page.keyboard.press("Control+A")
             page.keyboard.press("Backspace")
             page.wait_for_timeout(300)
-            page.keyboard.insert_text(parent_video_id)
+            page.keyboard.insert_text(parent_title[:25])
             page.wait_for_timeout(3000)
             log.info("[YouTube Shorts] Searched for video ID: %s", parent_video_id)
         else:
@@ -1192,7 +1192,7 @@ def _extract_short_url(page) -> str | None:
     return None
 
 
-def set_related_video(page, short_id: str, parent_video_id: str) -> bool:
+def set_related_video(page, short_id: str, parent_title: str, parent_video_id: str) -> bool:
     """
     Link a YouTube Short to its parent full-length video via the "Related video"
     feature in YouTube Studio.
@@ -1273,7 +1273,7 @@ def set_related_video(page, short_id: str, parent_video_id: str) -> bool:
             page.keyboard.press("Control+A")
             page.keyboard.press("Backspace")
             page.wait_for_timeout(300)
-            page.keyboard.insert_text(parent_video_id)
+            page.keyboard.insert_text(parent_title[:25])
             page.wait_for_timeout(3000)
             log.info("[YouTube Shorts] Searched for video ID: %s", parent_video_id)
         else:
@@ -1393,3 +1393,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

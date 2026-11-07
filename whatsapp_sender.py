@@ -59,10 +59,33 @@ def connect_whatsapp_cdp() -> Optional[object]:
         with socket.create_connection(("127.0.0.1", 9222), timeout=0.5):
             pass
     except OSError:
-        log.error("[WhatsApp Sender] Chrome CDP port 9222 is not listening. "
-                  "Start Chrome with --user-data-dir=%s --remote-debugging-port=9222",
-                  WHATSAPP_USER_DATA)
-        return None
+        log.info("[WhatsApp Sender] Chrome CDP port 9222 not listening. Launching Chrome with remote debugging...")
+        import subprocess
+        subprocess.Popen(
+            [
+                "chrome.exe",
+                "--remote-debugging-port=9222",
+                f"--user-data-dir={WHATSAPP_USER_DATA}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--start-minimized",
+                "about:blank",
+            ],
+            shell=True,
+            cwd=None,
+        )
+        # Wait up to 20 seconds for port 9222 to accept connections
+        for i in range(40):
+            time.sleep(0.5)
+            try:
+                with socket.create_connection(("127.0.0.1", 9222), timeout=0.5):
+                    log.info("[WhatsApp Sender] Chrome CDP port 9222 is now listening.")
+                    break
+            except OSError:
+                continue
+        else:
+            log.error("[WhatsApp Sender] Chrome CDP port 9222 did not accept connections within 20s.")
+            return None
 
     try:
         p = sync_playwright().start()
