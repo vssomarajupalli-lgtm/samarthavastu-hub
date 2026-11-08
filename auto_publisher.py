@@ -52,7 +52,7 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import psutil
@@ -1245,7 +1245,7 @@ def run_stage_b_prepare_tomorrow(schedule: list, dry_run: bool = False) -> dict 
     try:
         from youtube_sync import sync_youtube
         log.info("[Stage B] Running youtube_sync to ensure newest uploads are queued first...")
-        sync_youtube(force_poster=False)
+        sync_youtube(force_poster=False, dry_run=dry_run)
         schedule = load_schedule()
     except Exception as exc:
         log.warning("[Stage B] Sync note: %s", exc)
@@ -1276,7 +1276,8 @@ def run_stage_b_prepare_tomorrow(schedule: list, dry_run: bool = False) -> dict 
     # exit immediately with ZERO WhatsApp Web navigation (prevents hourly
     # Task Scheduler triggers from re-sending duplicate separator + poster).
     today_str = datetime.now().strftime("%Y-%m-%d")
-    if candidate.get("preview_sent_date") == today_str:
+    tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    if candidate.get("scheduled_date") == tomorrow_str and candidate.get("preview_sent_date") == today_str:
         log.info("[Stage B] Preview already sent today (%s) for %s — skipping all WhatsApp sends.", today_str, candidate["id"])
         return candidate
 
@@ -1286,9 +1287,6 @@ def run_stage_b_prepare_tomorrow(schedule: list, dry_run: bool = False) -> dict 
 
     # Build daily posting report from today's completed item
     today_str = datetime.now().strftime("%Y-%m-%d")
-    tomorrow_dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    tomorrow_dt = tomorrow_dt.replace(day=tomorrow_dt.day + 1)
-    tomorrow_str = tomorrow_dt.strftime("%Y-%m-%d")
     
     today_item = None
     for item in schedule:
@@ -1737,7 +1735,8 @@ def main():
 
     if args.prepare_tomorrow:
         today_str = datetime.now().strftime("%Y-%m-%d")
-        if any(item.get("status") == "preview_approved" and item.get("preview_sent_date") == today_str for item in schedule):
+        tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        if any(item.get("status") == "preview_approved" and item.get("scheduled_date") == tomorrow_str and item.get("preview_sent_date") == today_str for item in schedule):
             log.info("[Stage B] Preview already sent today (%s) — skipping all WhatsApp sends.", today_str)
             return
         run_stage_b_prepare_tomorrow(schedule, dry_run=DRY_RUN)
@@ -1751,7 +1750,8 @@ def main():
         run_stage_a_public_publish(schedule, dry_run=DRY_RUN, force=args.force)
         refreshed_schedule = load_schedule()
         today_str = datetime.now().strftime("%Y-%m-%d")
-        if any(item.get("status") == "preview_approved" and item.get("preview_sent_date") == today_str for item in refreshed_schedule):
+        tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        if any(item.get("status") == "preview_approved" and item.get("scheduled_date") == tomorrow_str and item.get("preview_sent_date") == today_str for item in refreshed_schedule):
             log.info("[Stage B] Preview already sent today (%s) — skipping all WhatsApp sends.", today_str)
         else:
             run_stage_b_prepare_tomorrow(refreshed_schedule, dry_run=DRY_RUN)

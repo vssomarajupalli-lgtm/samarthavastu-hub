@@ -386,7 +386,7 @@ def generate_branded_poster(item: dict, output_path: str | Path) -> str:
 
 # ── Smart YouTube Sync Orchestrator ──────────────────────────────────────────
 
-def sync_youtube(force_poster: bool = True) -> dict:
+def sync_youtube(force_poster: bool = True, dry_run: bool = False) -> dict:
     """
     Executes the full YouTube Priority Sync:
     1. Scans channel /videos and /shorts.
@@ -613,7 +613,10 @@ def sync_youtube(force_poster: bool = True) -> dict:
         top_item["thumbnail_file"] = f"vastu_content_queue\\thumbnails\\{top_item['id']}.jpg"
 
     # Save to master_schedule.json
-    save_schedule(final_schedule)
+    if not dry_run:
+        save_schedule(final_schedule)
+    else:
+        log.info("[Dry-run] Skipping save_schedule()")
 
     unposted_count = len(pending_items)
     log.info("=" * 62)
