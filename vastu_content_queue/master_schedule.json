@@ -434,7 +434,8 @@
     "cdn_image_url": "https://scontent.ftir1-2.fna.fbcdn.net/v/t39.30808-6/893428048_122242162406350333_7429120844587768966_n.jpg?_nc_cat=104&_nc_map=urlgen_bucketless&ccb=1-7&_nc_sid=e5c1b6&_nc_ohc=vu7RUhsMfpIQ7kNvwFtPTkA&_nc_oc=AdpwlGQNhzxd7ykimbd86QNq1d8WQT5bwprXQLHgKFx5xWKTQCr-AidQRZQ6RmUzTu4&_nc_zt=23&_nc_ht=scontent.ftir1-2.fna&edm=AMAeTUEEAAAA&_nc_gid=OczYz3TgIJ36SI5gj40mEw&_nc_tpa=Q5bMBQL_9NWeJhk0QJaVAGpgey-TZgC2Mb1Gj6GS-XHl1nu5gPaRvRWM2DFMeyfchD8Lk5CIe7bt9uxGDg&oh=00_AQQ8mn_UMuvWxvh4JhBpCJmBIAVl5Wyjz8jHBnY-E23-Og&oe=6AF57E29",
     "yt_short_url": "https://youtube.com/shorts/xiIXimQVHjY",
     "wa_group_sent": true,
-    "wa_admin_sent": true
+    "wa_admin_sent": true,
+    "tg_sent": true
   },
   {
     "id": "yt_sZcJ9hohbyA",
@@ -449,7 +450,7 @@
     "thumbnail_file": "vastu_content_queue\\thumbnails\\yt_sZcJ9hohbyA.jpg",
     "has_thumbnail": true,
     "has_video": false,
-    "status": "pending",
+    "status": "preview_approved",
     "scheduled_date": "2026-11-09",
     "scheduled_time": "08:00:00",
     "scheduled_at": "2026-11-09T08:00:00",
@@ -458,7 +459,9 @@
     "fb_post_url": null,
     "ig_media_id": null,
     "ig_post_url": null,
-    "wa_sent": false
+    "wa_sent": false,
+    "separator_sent_date": "2026-11-08",
+    "preview_sent_date": "2026-11-08"
   },
   {
     "id": "yt_EIUDhsUGrmo",
