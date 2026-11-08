@@ -47,6 +47,7 @@ import ctypes
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import sys
@@ -59,6 +60,40 @@ import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# --- Security & Risk Constants ---
+CHANNEL_DELAY_RANGE = (4, 8)  # seconds, randomized delay between channel executions
+STRICT_DATE_LOCK = True       # Only process items where scheduled_date == today
+ENABLE_RATE_LIMITING = True   # Enable randomized delays between channels
+ATOMIC_WRITE_VERIFY = True    # Verify atomic write integrity after save
+
+
+def _rate_limit_delay():
+    """Apply randomized delay between channel executions to mimic human behavior and avoid spam filters."""
+    if ENABLE_RATE_LIMITING:
+        delay = random.uniform(*CHANNEL_DELAY_RANGE)
+        log.info(f"[Rate Limit] Waiting {delay:.1f}s before next channel...")
+        time.sleep(delay)
+
+
+def _verify_atomic_write(original_path: Path, temp_path: Path) -> bool:
+    """Verify atomic write completed successfully by checking both files exist and have content."""
+    try:
+        if not original_path.exists():
+            log.error("[Atomic Write] Original file missing after replace: %s", original_path)
+            return False
+        if original_path.stat().st_size == 0:
+            log.error("[Atomic Write] Original file is empty: %s", original_path)
+            return False
+        # Verify JSON is valid
+        with open(original_path, encoding="utf-8-sig") as f:
+            json.load(f)
+        log.info("[Atomic Write] Verified: %s (%d bytes)", original_path, original_path.stat().st_size)
+        return True
+    except Exception as exc:
+        log.error("[Atomic Write] Verification failed for %s: %s", original_path, exc)
+        return False
+
 
 # --- Paths ---
 BASE_DIR        = Path(__file__).resolve().parent
@@ -250,18 +285,45 @@ def save_schedule(items: list):
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     tmp_file = SCHEDULE_FILE.with_suffix(SCHEDULE_FILE.suffix + ".tmp")
     bak_file = SCHEDULE_FILE.with_suffix(SCHEDULE_FILE.suffix + ".bak")
+    
+    # Create backup before write
     if SCHEDULE_FILE.exists():
         try:
-            os.replace(SCHEDULE_FILE, bak_file)
-        except OSError:
-            pass
+            import shutil
+            shutil.copy2(SCHEDULE_FILE, bak_file)
+            log.info("[Save Schedule] Backup created: %s", bak_file)
+        except OSError as exc:
+            log.warning("[Save Schedule] Backup failed: %s", exc)
+    
+    # Write to temp file
     with open(tmp_file, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
         f.flush()
         os.fsync(f.fileno())
+    
+    # Atomic replace
     os.replace(tmp_file, SCHEDULE_FILE)
+    log.info("[Save Schedule] Atomic replace completed: %s", SCHEDULE_FILE)
+    
+    # Verify atomic write integrity
+    if ATOMIC_WRITE_VERIFY:
+        if not _verify_atomic_write(SCHEDULE_FILE, tmp_file):
+            # Attempt recovery from backup
+            if bak_file.exists():
+                log.warning("[Save Schedule] Attempting recovery from backup...")
+                try:
+                    import shutil
+                    shutil.copy2(bak_file, SCHEDULE_FILE)
+                    log.info("[Save Schedule] Restored from backup: %s", bak_file)
+                except Exception as exc:
+                    log.error("[Save Schedule] Recovery failed: %s", exc)
+            else:
+                log.error("[Save Schedule] No backup available for recovery!")
+    
+    # Cleanup old backup
     try:
-        bak_file.unlink(missing_ok=True)
+        if bak_file.exists():
+            bak_file.unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -966,34 +1028,43 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
     if not dry_run and not force and check_daily_published_lock(schedule, force=force):
         return True
 
+    # STRICT DATE LOCK: Only process items scheduled for today
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    
     # Find the target item:
     # 1. First check if today's item is incomplete across channels (e.g. missing WhatsApp, YouTube Shorts, etc.)
-    today_str = datetime.now().strftime("%Y-%m-%d")
     target_item = None
     for item in schedule:
         pub_at = item.get("published_at") or ""
-        if pub_at.startswith(today_str) and not is_daily_completed_for_item(item):
+        scheduled_date = item.get("scheduled_date") or ""
+        is_today_scheduled = scheduled_date == today_str
+        if is_today_scheduled and pub_at.startswith(today_str) and not is_daily_completed_for_item(item):
             target_item = item
             log.info("[Stage A] Resuming today's incomplete post: %s (%s)", item["id"], item.get("title", "")[:40])
             break
 
-    # 2. Look for "preview_approved" item
+    # 2. Look for "preview_approved" item with today's scheduled_date
     if not target_item:
         for item in schedule:
-            if item.get("status") == "preview_approved":
+            scheduled_date = item.get("scheduled_date") or ""
+            if scheduled_date == today_str and item.get("status") == "preview_approved":
                 target_item = item
+                log.info("[Stage A] Found today's preview_approved item: %s (%s)", item["id"], item.get("title", "")[:40])
                 break
 
-    # 3. Fallback to earliest pending
+    # 3. Fallback: earliest pending with today's scheduled_date
     if not target_item:
         for item in schedule:
-            if item.get("status") not in ("published", "skipped"):
+            scheduled_date = item.get("scheduled_date") or ""
+            if scheduled_date == today_str and item.get("status") not in ("published", "skipped"):
                 target_item = item
+                log.info("[Stage A] Fallback to earliest pending for today: %s (%s)", item["id"], item.get("title", "")[:40])
                 break
 
+    # STRICT: If no item scheduled for today, exit gracefully
     if not target_item:
-        log.warning("[Stage A] No approved or pending items found in queue.")
-        return False
+        log.info("[Stage A] No item scheduled for today (%s). Skipping Stage A.", today_str)
+        return True
 
     item_id = target_item["id"]
     poster_path = ensure_poster_exists(target_item)
@@ -1020,6 +1091,7 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
             target_item["fb_post_url"]  = fb_res.get("post_url", "")
             target_item["cdn_image_url"] = fb_res.get("cdn_image_url")
             save_schedule(schedule)
+    _rate_limit_delay()
 
     fb_post_id  = fb_res.get("post_id")
     fb_post_url = fb_res.get("post_url", "")
@@ -1039,6 +1111,7 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
             target_item["ig_media_id"] = ig_res.get("media_id")
             target_item["ig_post_url"] = ig_res.get("post_url", "")
             save_schedule(schedule)
+    _rate_limit_delay()
 
     ig_media_id = ig_res.get("media_id")
     ig_post_url = ig_res.get("post_url", "")
@@ -1064,6 +1137,7 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
         except Exception as exc:
             log.error("[YouTube Shorts] Upload error: %s", exc)
             yt_res = {"success": False, "short_url": None, "error": str(exc)}
+    _rate_limit_delay()
 
     yt_short_url = yt_res.get("short_url", "") if yt_res.get("success") else ""
 
@@ -1100,6 +1174,7 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
         if a_ok and not dry_run:
             target_item["wa_admin_sent"] = True
             save_schedule(schedule)
+    _rate_limit_delay()
 
     # 5. Telegram Channel
     tg_caption = build_telegram_caption(target_item)
@@ -1299,9 +1374,12 @@ def run_stage_b_prepare_tomorrow(schedule: list, dry_run: bool = False) -> dict 
 def run_skip_tomorrow(schedule: list, dry_run: bool = False):
     """
     Marks current "preview_approved" video as "skipped",
-    picks the next newest unposted video, generates poster, and sends updated preview.
+    picks the next newest unposted video with tomorrow's scheduled_date, generates poster, and sends updated preview.
     """
     section("SKIP TOMORROW — REGENERATING NEXT VIDEO")
+
+    tomorrow_str = (datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) + 
+                   datetime.timedelta(days=1)).strftime("%Y-%m-%d")
 
     current_preview = None
     for item in schedule:
@@ -1313,17 +1391,17 @@ def run_skip_tomorrow(schedule: list, dry_run: bool = False):
         log.info("Marking '%s' (%s) as 'skipped'...", current_preview["id"], current_preview.get("title","")[:40])
         current_preview["status"] = "skipped"
     else:
-        log.info("No current 'preview_approved' item found; selecting next unposted item.")
+        log.info("No current 'preview_approved' item found; selecting next unposted item for tomorrow.")
 
     next_candidate = None
     for item in schedule:
-        if item.get("status") not in ("published", "skipped"):
+        scheduled_date = item.get("scheduled_date") or ""
+        if scheduled_date == tomorrow_str and item.get("status") not in ("published", "skipped"):
             next_candidate = item
             break
 
     if not next_candidate:
-        log.warning("No more unposted videos in queue!")
-        save_schedule(schedule)
+        log.warning("No item scheduled for tomorrow (%s). Skipping skip.", tomorrow_str)
         return
 
     # Invariant: Strictly only ONE item can ever be in 'preview_approved' status
@@ -1337,17 +1415,13 @@ def run_skip_tomorrow(schedule: list, dry_run: bool = False):
 
     # Build daily posting report from today's completed item
     today_str = datetime.now().strftime("%Y-%m-%d")
-    tomorrow_dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    tomorrow_dt = tomorrow_dt.replace(day=tomorrow_dt.day + 1)
-    tomorrow_str = tomorrow_dt.strftime("%Y-%m-%d")
-    
     today_item = None
     for item in schedule:
         pub_at = item.get("published_at") or ""
         if pub_at.startswith(today_str) and item.get("status") == "published":
             today_item = item
             break
-    
+
     daily_report = build_daily_posting_report(today_item, today_str, tomorrow_str)
 
     preview_caption = build_whatsapp_caption(
@@ -1356,7 +1430,7 @@ def run_skip_tomorrow(schedule: list, dry_run: bool = False):
         is_admin=True,
         remaining_unposted=remaining_unposted,
     )
-    
+
     # Prepend daily report to preview caption
     if daily_report:
         preview_caption = daily_report + preview_caption

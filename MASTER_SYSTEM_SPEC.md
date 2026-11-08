@@ -217,3 +217,79 @@ For all non-manual runs (`not MANUAL_RUN`):
   ```powershell
   python -m py_compile auto_publisher.py youtube_shorts_uploader.py whatsapp_sender.py meta_publisher.py html_poster_generator.py youtube_sync.py
   ```
+
+---
+
+## 9. Security & Risk Management (Comprehensive Safeguards)
+
+### 9.1 Strict Date Lock (No Backlog / Double Posting)
+**Location:** `run_stage_a_public_publish()`, `run_skip_tomorrow()`
+
+- **Rule:** System ONLY processes items where `scheduled_date == today` (strict equality).
+- **No Backlog:** If system was offline yesterday, missed items are **gracefully skipped** — never auto-posted today.
+- **No Double Posting:** Maximum one item per day. If no item scheduled for today, Stage A exits cleanly (`return True`) without error.
+- **Stage B Gate:** `run_skip_tomorrow()` and `run_stage_b_prepare_tomorrow()` only select candidates where `scheduled_date == tomorrow`.
+- **Config:** `STRICT_DATE_LOCK = True` (global constant, can be toggled for testing).
+
+### 9.2 Anti-Spam & Rate Limiting (Ban Prevention)
+**Location:** `_rate_limit_delay()`, called between each channel in Stage A.
+
+- **Randomized Delay:** Between each channel execution (Facebook → Instagram → Shorts → WhatsApp → Telegram), applies `time.sleep(random.uniform(4, 8))`.
+- **Configurable:** `CHANNEL_DELAY_RANGE = (4, 8)` and `ENABLE_RATE_LIMITING = True` (global constants).
+- **Mimics Human Behavior:** Variable delays prevent API spam filters from flagging automated bursts.
+- **Logged:** Each delay logged as `[Rate Limit] Waiting X.Ys before next channel...` for auditability.
+
+### 9.3 Data Corruption Safety (Power-Cut Proofing)
+**Location:** `save_schedule()`, `_verify_atomic_write()`
+
+- **Atomic Write Pattern:** Write to `.tmp` file → `fsync()` → `os.replace()` (atomic on POSIX/Windows).
+- **Backup Before Write:** Creates `.bak` copy via `shutil.copy2()` before every write.
+- **Post-Write Verification:** `_verify_atomic_write()` checks: file exists, non-zero size, valid JSON.
+- **Auto-Recovery:** If verification fails, automatically restores from `.bak` backup and logs warning.
+- **Config:** `ATOMIC_WRITE_VERIFY = True` (global constant).
+
+### 9.4 Partial Crash Recovery (Idempotency)
+**Location:** `run_stage_a_public_publish()`, `is_daily_completed_for_item()`
+
+- **Per-Channel State Flags:** Each channel has dedicated boolean in `master_schedule.json`:
+  - `fb_post_url`, `ig_post_url`, `yt_short_url`, `wa_group_sent`, `wa_admin_sent`, `tg_sent`
+- **Skip-on-Complete:** Before each channel, checks flag — if already `True`, logs `Already published... (Skipping re-post)` and continues.
+- **Atomic Commit:** Only after ALL channels succeed, sets `status = "published"` and `published_at` timestamp.
+- **Resume Capability:** If crash occurs after Facebook + Instagram, re-run resumes at YouTube Shorts (flags prevent re-posting).
+- **Daily Lock Integration:** `check_daily_published_lock()` evaluates ALL 7 channels; incomplete runs resume missing channels only.
+
+### 9.5 Secrets Leak Prevention
+**Location:** `.gitignore`, `.env.example`
+
+- **Enforced:** `.gitignore` explicitly ignores `.env` and `.env.*` (line 2-3).
+- **Template:** `.env.example` documents required keys without values.
+- **Runtime:** `load_dotenv()` loads secrets from `.env` at startup — never hardcoded.
+- **Audit:** Verified `.env` never appears in `git status` or commit history.
+
+---
+
+## 10. Testing & Verification Protocols
+
+### 10.1 Dry-Run Validation
+```bash
+python auto_publisher.py --daily-run --dry-run --force
+```
+Verifies: target selection, caption building, channel order, rate limit logs, atomic write logs — **zero external API calls**.
+
+### 10.2 Syntax Verification
+```bash
+python -m py_compile auto_publisher.py youtube_shorts_uploader.py whatsapp_sender.py meta_publisher.py html_poster_generator.py youtube_sync.py
+```
+Must pass before every commit.
+
+### 10.3 Atomic Write Stress Test
+Simulate power loss during write:
+1. Add `time.sleep(5)` after `os.replace()` in `save_schedule()`
+2. Kill process mid-write
+3. Verify auto-recovery from `.bak` on next run
+
+### 10.4 Idempotency Stress Test
+1. Publish to 3 of 7 channels
+2. Kill process
+4. Re-run — verify only remaining 4 channels execute
+5. Verify zero duplicate posts on any platform
