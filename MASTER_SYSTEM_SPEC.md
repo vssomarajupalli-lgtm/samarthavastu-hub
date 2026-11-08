@@ -8,6 +8,7 @@
 **YouTube Channel:** `@samarthavastu999` (Channel ID: `UCDtcb0drjmLgG3ARTh4e7jw`)  
 **Consultation & Admin WhatsApp:** `+91 8919395559`  
 **Public WhatsApp Group Invite Code:** `DvPDx43oel4LQQgqCsn7Tr`
+**Telegram Channel:** `@samarthaasrovastu_official` (Chat ID: `-1003998248199`)
 
 ---
 
@@ -56,7 +57,7 @@ For all non-manual runs (`not MANUAL_RUN`):
 
 ### 3.3 Human-in-the-Loop Confirmation
 - After stabilization within active hours, present a **Yes / No** confirmation dialog displaying today's scheduled Telugu title.
-- If only some channels are complete (partial run from earlier failure), the dialog shows `N/6 Channels Completed — Pending: [Channel Name] Resume pending channel(s) now?`
+- If only some channels are complete (partial run from earlier failure), the dialog shows `N/7 Channels Completed — Pending: [Channel Name] Resume pending channel(s) now?` (7 = FB, IG, Shorts, WA Group, WA Admin, Telegram).
 - Clicking **Yes** runs the pipeline; clicking **No** snoozes automatic prompts for the remainder of that calendar day without hourly nagging.
 
 ### 3.4 Manual Bypass
@@ -66,7 +67,7 @@ For all non-manual runs (`not MANUAL_RUN`):
 - At script startup, **before** any internet wait, desktop unlock, stabilization delay, or Chrome launch:
   - Checks `publisher.lock` for stale PID (auto-clears if process is dead)
   - Checks `declined_today.txt`: if user clicked No today, exit silently in `< 1s`
-  - Checks `master_schedule.json`: if today's item has all 6 channels complete AND Stage B preview sent today, exit silently in `< 1s`
+  - Checks `master_schedule.json`: if today's item has all 7 channels complete AND Stage B preview sent today, exit silently in `< 1s`
 - This prevents unnecessary Chrome launches, popups, or waits when work is already done.
 
 ### 3.6 Stage B Idempotency (`preview_sent_date`, `separator_sent_date`)
@@ -130,6 +131,16 @@ For all non-manual runs (`not MANUAL_RUN`):
 ### 5.3 Meta Graph API (`meta_publisher.py`)
 - Publishes `1080x1350` poster + Telugu caption to Facebook Page and Instagram Business account using credentials in `.env`.
 
+### 5.4 Telegram Bot API (`auto_publisher.py` — `publish_to_telegram()`)
+- Posts `1080x1350` poster + Telugu/HTML caption to Telegram channel `@samarthaasrovastu_official` via Bot API `sendPhoto` endpoint.
+- **Environment:** `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` (Chat ID starts with `-100` for channels).
+- **Caption:** HTML parse_mode (`<b>` bold, `<a href="">` links); caption truncated to 1024 chars.
+- **Deduplication:** Checks `tg_sent` flag in `master_schedule.json` before sending; skips if already sent.
+- **Integration:** Runs in Stage A after WhatsApp (step 5). On success, sets `tg_sent=true` and `published_at` timestamp.
+- **Daily Lock Gate:** `is_daily_completed_for_item()` now requires `tg_sent=true`; the instant silent pre-check and confirmation dialog both account for the 7th channel (Telegram).
+- **Return Contract:** `publish_to_telegram()` returns `{"success": bool, "message_id": int|None, "error": str|None}` — never a raw `bool`; callers use `.get("success")` safely.
+- **Error Handling:** If Bot token or Chat ID missing, or poster file not found, logs warning and returns `success=False` — does not abort the pipeline.
+
 ---
 
 ## 6. Strict Code Guardrails (Enforced by Recent Audits)
@@ -161,7 +172,7 @@ For all non-manual runs (`not MANUAL_RUN`):
 
 | File / Path | Role in Pipeline |
 | :--- | :--- |
-| `auto_publisher.py` | Master orchestrator: active-hours gate (`06:00`–`21:00`), 5-minute stabilization timer, Yes/No prompt, `ensure_poster_exists()` dimension check, Stage A & Stage B execution, atomic `save_schedule()`, Git push sync, `dispatch_whatsapp_text()` separator. |
+|| `auto_publisher.py` | Master orchestrator: active-hours gate (`06:00`–`21:00`), 5-minute stabilization timer, Yes/No prompt, `ensure_poster_exists()` dimension check, Stage A & Stage B execution, atomic `save_schedule()`, Git push sync, `dispatch_whatsapp_text()` separator, **Telegram `publish_to_telegram()` (step 5 in Stage A)**. |
 | `vastu_content_queue/master_schedule.json` | Single source of truth for the content queue (`published` vs. pending items, Telugu titles, descriptions, source YouTube URLs, verified `yt_short_url`, Meta post IDs, and publish dates). |
 | `html_poster_generator.py` | Renders crisp `1080x1350` (4:5 portrait) branded social posters via Headless Chrome HTML/CSS using `Noto Sans Telugu` (HarfBuzz complex script shaping). |
 | `youtube_shorts_uploader.py` | Renders `1080x1920` (9:16) vertical frames via Headless Chrome HTML/CSS, encodes MP4s via FFmpeg, and automates YouTube Studio upload & `Public` publishing over Playwright CDP (`9222`). |

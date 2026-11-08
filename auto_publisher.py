@@ -12,7 +12,8 @@ Workflow:
        - Facebook Page (photo + clean Telugu caption)
        - Facebook First Comment (YouTube video link with clickable preview card)
        - Instagram Business Account (4:5 poster + Telugu caption <= 2000 chars)
-       - WhatsApp Public Group (DvPDx43oel4LQQgqCsn7Tr) & Personal WhatsApp (+918919395559)
+       - WhatsApp Public Group (DvPDx43oel4LQQgqCsn7Tr) & Personal WhatsApp (+918****5559)
+       - Telegram Channel (@samarthaasrovastu_official)
     5. Marks item as "status": "published".
     6. Calls website_sync.py to update public/videos_data.json and index.html.
     7. Runs auto_git_sync() to commit and push updates to GitHub.
@@ -196,9 +197,13 @@ META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN",  "")
 YOUTUBE_URL       = os.getenv("YOUTUBE_URL",        "https://www.youtube.com/@samarthavastu999")
 CONTACT_PHONE     = os.getenv("CONTACT_PHONE",      "+91 8919395559")
 CONTACT_EMAIL     = os.getenv("CONTACT_EMAIL",      "samarthavastu999@gmail.com")
-WHATSAPP_TARGET   = os.getenv("WHATSAPP_TARGET",    "DvPDx43oel4LQQgqCsn7Tr,+918919395559")
-WHATSAPP_ADMIN    = os.getenv("WHATSAPP_ADMIN",     "+918919395559")
+WHATSAPP_TARGET   = os.getenv("WHATSAPP_TARGET",    "DvPDx43oel4LQQgqCsn7Tr,+918****5559")
+WHATSAPP_ADMIN    = os.getenv("WHATSAPP_ADMIN",     "+918****5559")
 WHATSAPP_GROUP    = "DvPDx43oel4LQQgqCsn7Tr"
+
+# --- Telegram ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # --- Instagram polling ---
 IG_POLL_INTERVAL = 4   # seconds
@@ -317,31 +322,34 @@ def wait_for_unlocked_desktop(timeout_sec: int = 1800) -> bool:
 
 def is_daily_completed_for_item(item: dict) -> bool:
     """
-    Checks if an item has successfully completed all 5 distribution channels:
+    Checks if an item has successfully completed all 6 distribution channels:
     1. Facebook Page (fb_post_url)
     2. Instagram Business (ig_post_url)
     3. YouTube Shorts (yt_short_url)
     4. WhatsApp Public Group (wa_group_sent)
     5. WhatsApp Personal Admin (wa_admin_sent)
+    6. Telegram Channel (tg_sent)
     """
     has_fb = bool(item.get("fb_post_url"))
     has_ig = bool(item.get("ig_post_url"))
     has_yt = bool(item.get("yt_short_url"))
     has_wa_grp = bool(item.get("wa_group_sent"))
     has_wa_adm = bool(item.get("wa_admin_sent"))
+    has_tg = bool(item.get("tg_sent"))
     has_wa = bool(item.get("wa_sent") or (has_wa_grp and has_wa_adm))
-    return bool(has_fb and has_ig and has_yt and has_wa)
+    return bool(has_fb and has_ig and has_yt and has_wa and has_tg)
 
 
 def check_daily_published_lock(schedule: list, force: bool = False) -> bool:
     """
-    Checks if all channels (FB, IG, YouTube Shorts, WhatsApp Group & Personal Admin)
+    Checks if all channels (FB, IG, YouTube Shorts, WhatsApp Group & Personal Admin, Telegram)
     have completed for today (YYYY-MM-DD).
     Returns True (locked for the day) ONLY when an item published today has:
       - fb_post_url
       - ig_post_url
       - yt_short_url
       - wa_sent == True (or both wa_group_sent and wa_admin_sent)
+      - tg_sent == True
     If any single channel was missed earlier in the day, returns False so the
     catch-up trigger automatically resumes and finishes only the missing channel(s).
     """
@@ -362,14 +370,15 @@ def check_daily_published_lock(schedule: list, force: bool = False) -> bool:
                 log.info("  IG URL       : %s", item.get("ig_post_url"))
                 log.info("  Short URL    : %s", item.get("yt_short_url"))
                 log.info("  WA Group/Adm : %s / %s", item.get("wa_group_sent"), item.get("wa_admin_sent"))
+                log.info("  Telegram     : %s", item.get("tg_sent"))
                 log.info("Strict 1-post-per-day lock is ACTIVE. Exiting in <1s.")
                 return True
             else:
                 log.info("[Daily Lock Inactive] Today's post (%s) is INCOMPLETE across channels:", today_str)
-                log.info("  FB: %s | IG: %s | Shorts: %s | WA Group: %s | WA Admin: %s",
+                log.info("  FB: %s | IG: %s | Shorts: %s | WA Group: %s | WA Admin: %s | Telegram: %s",
                          bool(item.get("fb_post_url")), bool(item.get("ig_post_url")),
                          bool(item.get("yt_short_url")), bool(item.get("wa_group_sent")),
-                         bool(item.get("wa_admin_sent")))
+                         bool(item.get("wa_admin_sent")), bool(item.get("tg_sent")))
                 log.info("Resuming missing channel(s) now...")
                 return False
 
@@ -535,6 +544,40 @@ def build_whatsapp_caption(
         parts.append("")
     parts.append(footer)
     return "\n".join(parts)
+
+
+def build_telegram_caption(item: dict) -> str:
+    """
+    Builds Telegram formatted caption with HTML parsing (bold, links).
+    Telegram allows up to 1024 characters for caption.
+    """
+    title    = (item.get("title") or "").strip()
+    raw_desc = item.get("description") or item.get("caption") or ""
+    video_id = item.get("video_id", "")
+    is_short = item.get("is_short", False)
+
+    clean_desc = clean_description(raw_desc)
+    yt_url = f"https://www.youtube.com/shorts/{video_id}" if is_short else f"https://www.youtube.com/watch?v={video_id}"
+
+    # Telegram uses HTML parse_mode
+    parts = []
+    if title:
+        parts.append(f"<b>{title}</b>")
+    if clean_desc:
+        parts.append(clean_desc)
+    parts.append("")
+    parts.append(f"📺 <a href=\"{yt_url}\">Watch Full Video</a>")
+    parts.append(f"💬 <a href=\"https://wa.me/918919395559\">WhatsApp Consultation</a>")
+    parts.append(f"📞 {CONTACT_PHONE}")
+    parts.append(f"✉️ {CONTACT_EMAIL}")
+
+    caption = "\n".join(parts)
+
+    # Telegram caption limit is 1024 chars
+    if len(caption) > 1024:
+        caption = caption[:1020] + "..."
+
+    return caption
 
 
 # ---------------------------------------------------------------------------- #
@@ -737,6 +780,54 @@ def dispatch_whatsapp_text(
     except Exception as exc:
         log.error("[WhatsApp] Text dispatch failed for %s: %s", target, exc)
         return {"success": False, "target": target, "tag": tag, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------- #
+#  Telegram Publisher                                                            #
+# ---------------------------------------------------------------------------- #
+
+def publish_to_telegram(item: dict, poster_path: str, caption: str, dry_run: bool = False) -> dict:
+    """
+    Publishes a photo with caption to the Telegram channel using the Bot API.
+    Returns {"success": bool, "message_id": int|None, "error": str|None}.
+    """
+    if dry_run:
+        log.info("[Telegram] DRY-RUN — would send photo to chat %s", TELEGRAM_CHAT_ID)
+        return {"success": True, "message_id": 0, "error": None}
+
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.warning("[Telegram] Bot token or chat ID not configured — skipping")
+        return {"success": False, "message_id": None, "error": "Telegram not configured"}
+
+    if not Path(poster_path).exists():
+        err = f"Poster not found: {poster_path}"
+        log.error("[Telegram] %s", err)
+        return {"success": False, "message_id": None, "error": err}
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    try:
+        with open(poster_path, "rb") as img_file:
+            files = {"photo": img_file}
+            data = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "caption": caption,
+                "parse_mode": "HTML",  # supports bold, italic, links
+            }
+            resp = requests.post(url, files=files, data=data, timeout=30)
+        result = resp.json()
+
+        if result.get("ok"):
+            message_id = result.get("result", {}).get("message_id")
+            log.info("[Telegram] Published successfully to chat %s (message_id: %s)", TELEGRAM_CHAT_ID, message_id)
+            return {"success": True, "message_id": message_id, "error": None}
+        else:
+            err = result.get("description", "Unknown Telegram API error")
+            log.error("[Telegram] API error: %s", err)
+            return {"success": False, "message_id": None, "error": err}
+
+    except Exception as exc:
+        log.error("[Telegram] Upload failed: %s", exc)
+        return {"success": False, "message_id": None, "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------- #
@@ -978,7 +1069,20 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
             target_item["wa_admin_sent"] = True
             save_schedule(schedule)
 
-    any_success = fb_res.get("success") or ig_res.get("success") or yt_res.get("success") or g_ok or a_ok
+    # 5. Telegram Channel
+    tg_caption = build_telegram_caption(target_item)
+    tg_ok = target_item.get("tg_sent", False)
+    if tg_ok:
+        log.info("[Telegram] Already sent for %s (Skipping re-send)", item_id)
+    else:
+        log.info("[Telegram] Sending to channel: %s", TELEGRAM_CHAT_ID)
+        tg_res = publish_to_telegram(target_item, poster_path, tg_caption, dry_run=dry_run)
+        tg_ok = tg_res.get("success", False)
+        if tg_ok and not dry_run:
+            target_item["tg_sent"] = True
+            save_schedule(schedule)
+
+    any_success = fb_res.get("success") or ig_res.get("success") or yt_res.get("success") or g_ok or a_ok or tg_ok
     if any_success and not dry_run:
         target_item["status"]        = "published"
         target_item["scheduled_date"] = datetime.now().strftime("%Y-%m-%d")
@@ -991,6 +1095,7 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
         target_item["yt_short_url"]  = yt_short_url
         target_item["wa_group_sent"] = bool(g_ok)
         target_item["wa_admin_sent"] = bool(a_ok)
+        target_item["tg_sent"]       = bool(tg_ok)
         target_item["wa_sent"]       = bool(g_ok and a_ok)
         save_schedule(schedule)
 
@@ -1009,6 +1114,7 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
     print(f"  YouTube Short  : {'[OK]' if yt_res.get('success') else '[FAIL]'}  {yt_short_url}")
     print(f"  WhatsApp Group : {'[OK]' if g_ok else '[FAIL]'}")
     print(f"  WhatsApp Admin : {'[OK]' if a_ok else '[FAIL]'}")
+    print(f"  Telegram       : {'[OK]' if tg_ok else '[FAIL]'}")
 
     return any_success
 
@@ -1327,15 +1433,16 @@ def main():
                 today_item = item
                 break
         if today_item:
-            # Check ALL 6 channels complete + Stage B preview sent today
+            # Check ALL 7 channels complete + Stage B preview sent today
             has_fb = bool(today_item.get("fb_post_url"))
             has_ig = bool(today_item.get("ig_post_url"))
             has_yt = bool(today_item.get("yt_short_url"))
             has_wa_grp = bool(today_item.get("wa_group_sent"))
             has_wa_adm = bool(today_item.get("wa_admin_sent"))
+            has_tg = bool(today_item.get("tg_sent"))
             has_wa = bool(today_item.get("wa_sent") or (has_wa_grp and has_wa_adm))
             preview_sent_today = today_item.get("preview_sent_date") == today_str
-            if has_fb and has_ig and has_yt and has_wa and preview_sent_today:
+            if has_fb and has_ig and has_yt and has_wa and has_tg and preview_sent_today:
                 log.info("[Time Guard] Today's item %s is 100%% complete across ALL channels. Exiting silently in <1s.", today_item.get("id"))
                 release_publisher_lock()
                 return
@@ -1450,6 +1557,7 @@ def main():
                 bool(target_item_for_dialog.get("yt_short_url")),
                 bool(target_item_for_dialog.get("wa_group_sent")),
                 bool(target_item_for_dialog.get("wa_admin_sent")),
+                bool(target_item_for_dialog.get("tg_sent")),
             ])
             # Determine which channel is pending
             if not target_item_for_dialog.get("fb_post_url"):
@@ -1462,7 +1570,9 @@ def main():
                 pending_channel = "WhatsApp Group"
             elif not target_item_for_dialog.get("wa_admin_sent"):
                 pending_channel = "WhatsApp Admin"
-        if not show_confirmation_dialog(dialog_title, completed_channels, 6, pending_channel):
+            elif not target_item_for_dialog.get("tg_sent"):
+                pending_channel = "Telegram"
+        if not show_confirmation_dialog(dialog_title, completed_channels, 7, pending_channel):
             log.info("[Startup Gate] User clicked No — exiting safely (exit 0). Item remains queued for next session.")
             release_publisher_lock()
             return
