@@ -580,6 +580,38 @@ def build_telegram_caption(item: dict) -> str:
     return caption
 
 
+def build_daily_posting_report(today_item: dict, today_str: str, tomorrow_str: str) -> str:
+    """
+    Builds a unified WhatsApp Daily Posting Report for Stage B preview.
+    Returns the report text to prepend to tomorrow's preview caption.
+    """
+    if not today_item:
+        return ""
+
+    lines = []
+    lines.append("📊 *సమర్థ వాస్తు - డైలీ పోస్ట్ رిపోర్ట్*")
+    lines.append(f"✅ ఈరోజు ({today_str}) పోస్ట్:")
+    
+    # Channel status mapping
+    channels = [
+        ("fb_post_url", "Facebook", "📍"),
+        ("ig_post_url", "Instagram", "📍"),
+        ("yt_short_url", "YouTube Shorts", "📍"),
+        ("wa_group_sent", "WhatsApp Group", "📍"),
+        ("tg_sent", "Telegram", "📍"),
+    ]
+    
+    for field, name, icon in channels:
+        status = "✅ Done" if today_item.get(field) else "❌ Failed"
+        lines.append(f"{icon} {name}: {status}")
+    
+    lines.append("-----------------------------------")
+    lines.append(f"🔜 *రేపటి ({tomorrow_str}) పోస్ట్ ప్రివ్యూ:*")
+    lines.append("")
+    
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------- #
 #  Facebook Publisher                                                            #
 # ---------------------------------------------------------------------------- #
@@ -1177,12 +1209,34 @@ def run_stage_b_prepare_tomorrow(schedule: list, dry_run: bool = False) -> dict 
     poster_path = ensure_poster_exists(candidate)
     remaining_unposted = sum(1 for i in schedule if i.get("status") not in ("published", "skipped") and i.get("id") != candidate["id"])
 
+    # Build daily posting report from today's completed item
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    tomorrow_dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_dt = tomorrow_dt.replace(day=tomorrow_dt.day + 1)
+    tomorrow_str = tomorrow_dt.strftime("%Y-%m-%d")
+    
+    today_item = None
+    for item in schedule:
+        pub_at = item.get("published_at") or ""
+        if pub_at.startswith(today_str) and item.get("status") == "published":
+            today_item = item
+            break
+    
+    daily_report = build_daily_posting_report(today_item, today_str, tomorrow_str)
+
     preview_caption = build_whatsapp_caption(
         candidate,
         is_preview=True,
         is_admin=True,
         remaining_unposted=remaining_unposted,
     )
+    
+    # Prepend daily report to preview caption
+    if daily_report:
+        preview_caption = daily_report + preview_caption
+        # Ensure combined caption doesn't exceed WhatsApp's 1024 char limit
+        if len(preview_caption) > 1024:
+            preview_caption = preview_caption[:1020] + "..."
 
     log.info("[Stage B] Selected Tomorrow's Candidate: %s (%s)", candidate["id"], candidate.get("title", "")[:45])
     log.info("[Stage B] Upload Date: %s | Remaining Unposted: %d", candidate.get("upload_date"), remaining_unposted)
@@ -1281,12 +1335,34 @@ def run_skip_tomorrow(schedule: list, dry_run: bool = False):
     poster_path = ensure_poster_exists(next_candidate)
     remaining_unposted = sum(1 for i in schedule if i.get("status") not in ("published", "skipped") and i.get("id") != next_candidate["id"])
 
+    # Build daily posting report from today's completed item
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    tomorrow_dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_dt = tomorrow_dt.replace(day=tomorrow_dt.day + 1)
+    tomorrow_str = tomorrow_dt.strftime("%Y-%m-%d")
+    
+    today_item = None
+    for item in schedule:
+        pub_at = item.get("published_at") or ""
+        if pub_at.startswith(today_str) and item.get("status") == "published":
+            today_item = item
+            break
+    
+    daily_report = build_daily_posting_report(today_item, today_str, tomorrow_str)
+
     preview_caption = build_whatsapp_caption(
         next_candidate,
         is_preview=True,
         is_admin=True,
         remaining_unposted=remaining_unposted,
     )
+    
+    # Prepend daily report to preview caption
+    if daily_report:
+        preview_caption = daily_report + preview_caption
+        # Ensure combined caption doesn't exceed WhatsApp's 1024 char limit
+        if len(preview_caption) > 1024:
+            preview_caption = preview_caption[:1020] + "..."
 
     log.info("Sending Replacement Preview ONLY to Personal WhatsApp: %s", WHATSAPP_ADMIN)
     dispatch_whatsapp_media(WHATSAPP_ADMIN, poster_path, preview_caption, tag="admin_preview_regen", dry_run=dry_run)

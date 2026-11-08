@@ -141,6 +141,26 @@ For all non-manual runs (`not MANUAL_RUN`):
 - **Return Contract:** `publish_to_telegram()` returns `{"success": bool, "message_id": int|None, "error": str|None}` — never a raw `bool`; callers use `.get("success")` safely.
 - **Error Handling:** If Bot token or Chat ID missing, or poster file not found, logs warning and returns `success=False` — does not abort the pipeline.
 
+### 5.5 WhatsApp Unified Notification (`auto_publisher.py` — Stage B `run_stage_b_prepare_tomorrow()` & `run_skip_tomorrow()`)
+- **Behavior:** Stage B (tomorrow's preview) now prepends a **Daily Posting Report** summarizing today's Stage A channel status to the WhatsApp preview message sent to the Personal Admin number (`+91 8919395559`).
+- **Report Format:**
+  ```
+  📊 *సమర్థ వాస్తు - డైలీ పోస్ట్ రిపోర్ట్*
+  ✅ ఈరోజు (YYYY-MM-DD) పోస్ట్:
+  📍 Facebook: ✅ Done
+  📍 Instagram: ✅ Done
+  📍 YouTube Shorts: ✅ Done
+  📍 WhatsApp Group: ✅ Done
+  📍 Telegram: ✅ Done
+  -----------------------------------
+  🔜 *రేపటి (YYYY-MM-DD) పోస్ట్ ప్రివ్యూ:*
+  [original preview caption with tomorrow's video title, description, links, queue status]
+  ```
+- **Channel Status Source:** Reads from today's `published` item in `master_schedule.json` (fields: `fb_post_url`, `ig_post_url`, `yt_short_url`, `wa_group_sent`, `tg_sent`). If today's item not found, report is skipped and only original preview is sent.
+- **Applied To:** Both `run_stage_b_prepare_tomorrow()` and `run_skip_tomorrow()` — ensures skip/regenerate flow also includes the daily report.
+- **Caption Limit:** WhatsApp caption is still truncated to ~1000 chars by `build_whatsapp_caption()`; the combined report + preview respects this limit.
+- **No Separator Change:** The existing `separator_sent_date` / `preview_sent_date` idempotency logic remains unchanged — the report is part of the preview caption, not a separate message.
+
 ---
 
 ## 6. Strict Code Guardrails (Enforced by Recent Audits)
