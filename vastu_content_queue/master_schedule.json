@@ -37,17 +37,18 @@
     "scheduled_time": "08:00:00",
     "scheduled_at": "2026-11-10T08:00:00",
     "published_at": "2026-11-10T06:57:07.313034",
-    "fb_post_id": null,
-    "fb_post_url": null,
-    "ig_media_id": null,
-    "ig_post_url": null,
+    "fb_post_id": "122242961762350333",
+    "fb_post_url": "https://www.facebook.com/122242961762350333",
+    "ig_media_id": "18157242160543355",
+    "ig_post_url": "https://www.instagram.com/p/Dfi_tb1nGGh/",
     "wa_sent": true,
     "separator_sent_date": "2026-11-09",
     "preview_sent_date": "2026-11-09",
     "yt_short_url": "https://youtube.com/shorts/6MbmgSaLsxc",
     "wa_group_sent": true,
     "wa_admin_sent": true,
-    "tg_sent": true
+    "tg_sent": true,
+    "cdn_image_url": "https://scontent.ftir1-2.fna.fbcdn.net/v/t39.30808-6/899772919_122242961768350333_5581454797340884757_n.jpg?_nc_cat=100&_nc_map=urlgen_bucketless&ccb=1-7&_nc_sid=e5c1b6&_nc_ohc=k5cMQmE06XQQ7kNvwGrKacz&_nc_oc=AdpIK1POtBjKrEzwZZHvL87AN7_2oQEbBdN7zhrHbQxLkgFAROCnC_Xj1bLzuZHkMPw&_nc_zt=23&_nc_ht=scontent.ftir1-2.fna&edm=AMAeTUEEAAAA&_nc_gid=HhIElSVy-yEfS6kOe64_jw&_nc_tpa=Q5bMBQJboR16z5uaVf2BrRpV8Yn3EI5qESUBeSHrNxOOpnM_MJB1CdfjXq_PgtLJhplh0_itcwV_QNnaeg&oh=00_AQSXZvrOpAs02As-Uq5ZgGE-NQCqKhIFy-hEhR0-0Bx3gg&oe=6AF861DA"
   },
   {
     "id": "yt_WDwIRbj_4I8",
