@@ -68,6 +68,18 @@ To prevent missed publications when the host laptop is kept closed or powered of
 
 ---
 
+## 🎬 Phase 1 & 3 Video Engine (`video_publisher.py`)
+A dedicated video automation pipeline that transforms scheduled landscape YouTube videos into 9:16 vertical Reels with intelligent voice detection and Telugu overlays.
+
+### Key Capabilities
+- **Smart Schedule Integration**: Reads `master_schedule.json` and auto-downloads the first landscape video (`is_short: false`) scheduled for today with status `"preview_approved"` or `"pending"` using **`yt-dlp`** (best MP4 format: `bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]`).
+- **True Voice Activity Detection (VAD)**: Uses **`librosa`** spectral feature analysis (centroid, bandwidth, flatness, rolloff, onset strength, zero-crossing rate) to distinguish human speech from background music intros. Detects the exact timestamp of first spoken word with sliding-window verification for sustained speech regions. Falls back gracefully to volume-based detection if `librosa` is unavailable.
+- **MoviePy 2.x Vertical Conversion**: Trims a precise 57-second window from the detected voice start. Converts 16:9 source to 1080×1920 (9:16) canvas: centered main video at 1080px width, stretched background at 1920px height darkened by 70% (`MultiplyColor(0.3)`) for a professional blurred-backdrop effect.
+- **Hardcoded Telugu Call-to-Action Overlay**: Renders `"📺 పూర్తి వీడియో కోసం\nకింద లింక్ చూడండి 👇"` (Watch full video, check link below) in yellow with black stroke (font size 55) using Windows Telugu fonts (`Nirmala`, `Gautami`, `Arial-Unicode-MS`, `Nirmala-UI`). Positioned at bottom center `(center, 1600)` of the 9:16 frame.
+- **Graceful Execution Flow**: If no landscape video is scheduled for today, exits cleanly with an INFO message. On success, outputs `final_reel_output.mp4` ready for Stage B upload.
+
+---
+
 ## 🛠️ Repository Structure
 
 ```text

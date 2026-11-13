@@ -1223,6 +1223,37 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
     print(f"  WhatsApp Admin : {'[OK]' if a_ok else '[FAIL]'}")
     print(f"  Telegram       : {'[OK]' if tg_ok else '[FAIL]'}")
 
+    # Send Daily WhatsApp Summary Report to Admin
+    if not dry_run:
+        fb_status = "OK" if fb_res.get('success') else "FAIL"
+        ig_status = "OK" if ig_res.get('success') else "FAIL"
+        yt_status = "OK" if yt_res.get('success') else "FAIL"
+        wa_group_status = "OK" if g_ok else "FAIL"
+        wa_admin_status = "OK" if a_ok else "FAIL"
+        tg_status = "OK" if tg_ok else "FAIL"
+
+        summary_msg = (
+            f"📊 *Daily Posting Report* ({datetime.now().strftime('%Y-%m-%d')})\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🌐 Facebook    : [{fb_status}]\n"
+            f"📸 Instagram   : [{ig_status}]\n"
+            f"⚡ YouTube Short: [{yt_status}]\n"
+            f"📱 WA Group    : [{wa_group_status}]\n"
+            f"👤 WA Admin    : [{wa_admin_status}]\n"
+            f"📢 Telegram    : [{tg_status}]\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ *Stage A Complete*"
+        )
+
+        log.info("[Stage A] Sending Daily Summary Report to Admin WhatsApp...")
+        dispatch_whatsapp_text(
+            target=WHATSAPP_ADMIN,
+            text=summary_msg,
+            tag="admin_daily_summary",
+            dry_run=False
+        )
+        time.sleep(2)
+
     return any_success
 
 
