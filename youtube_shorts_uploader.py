@@ -1067,71 +1067,223 @@ def set_related_video(page, short_id: str, parent_title: str, parent_video_id: s
                 log.info("[YouTube Shorts] Related video already set to %s — skipping", parent_video_id)
                 return True
 
-        # Click the related video picker button using JS click (Playwright click()
-                # is intercepted by modal overlay)
+        # -------------------------------------------------
+        # 1 & 2: Click AND Verify Dialog Flow (based on live DOM diagnosis)
+        # -------------------------------------------------
+        # The picker is ytcp-shorts-content-links-picker containing ytcp-text-dropdown-trigger#linked-video-editor-link
+        # The clickable trigger is ytcp-dropdown-trigger with role="button" and text "Related video\nNone"
+        # The dialog that opens is ytcp-video-pick-dialog (with inner tp-yt-paper-dialog)
+
+        dialog_selectors = [
+            'ytcp-video-pick-dialog',
+            'ytcp-dialog:has-text("Choose specific video")',
+            'tp-yt-paper-dialog:has-text("Choose specific video")',
+            'ytcp-related-video-picker-dialog',
+            '[data-testid="related-video-picker-dialog"]',
+            'ytcp-dialog:has-text("Related video")',
+            'tp-yt-paper-dialog:has(ytcp-related-video-picker-dialog)'
+        ]
+
+        def check_dialog():
+            for sel in dialog_selectors:
+                dlg = page.locator(sel).first
+                if dlg.count() > 0 and dlg.is_visible():
+                    return dlg
+            return None
+
+        picker_dialog = None
+
+        # Method 1: Click the dropdown trigger (the actual clickable button per DOM diagnosis)
+        related_picker = page.locator('ytcp-shorts-content-links-picker').first
+        if related_picker.count() > 0:
+            # Find the clickable dropdown trigger inside
+            dropdown_trigger = related_picker.locator('ytcp-dropdown-trigger[role="button"]').first
+            if dropdown_trigger.count() > 0:
+                dropdown_trigger.scroll_into_view_if_needed()
+                page.wait_for_timeout(1000)
+                try:
+                    dropdown_trigger.click(force=True)
+                    log.info("[YouTube Shorts] Clicked dropdown trigger (role=button)")
+                    page.wait_for_timeout(2000)
+                    picker_dialog = check_dialog()
+                except Exception as e:
+                    log.warning("[YouTube Shorts] Dropdown trigger click failed: %s", e)
+
+        # Method 2: Physical mouse click on picker center (proven to work in diagnosis)
+        if not picker_dialog:
+            log.info("[YouTube Shorts] Trying physical mouse click on picker center...")
+            if related_picker.count() > 0:
+                related_picker.scroll_into_view_if_needed()
+                page.wait_for_timeout(1000)
+                box = related_picker.bounding_box()
+                if box:
+                    cx = box['x'] + box['width'] / 2
+                    cy = box['y'] + box['height'] / 2
+                    try:
+                        page.mouse.move(cx, cy)
+                        page.wait_for_timeout(300)
+                        page.mouse.click(cx, cy)
+                        log.info("[YouTube Shorts] Physical mouse click at ({}, {})".format(cx, cy))
+                        page.wait_for_timeout(3000)
+                        picker_dialog = check_dialog()
+                    except Exception as e:
+                        log.warning("[YouTube Shorts] Physical mouse click failed: %s", e)
+
+        # Method 3: JS click on dropdown trigger
+        if not picker_dialog:
+            log.info("[YouTube Shorts] Trying JS click on dropdown trigger...")
+            try:
                 page.evaluate("""() => {
-                    const btn = document.querySelector('ytcp-shorts-content-links-picker');
-                    if (btn) btn.click();
+                    const picker = document.querySelector('ytcp-shorts-content-links-picker');
+                    if (picker) {
+                        const trigger = picker.querySelector('ytcp-dropdown-trigger[role="button"]');
+                        if (trigger) trigger.click();
+                    }
                 }""")
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(2000)
+                picker_dialog = check_dialog()
+            except Exception: pass
 
-        # Look for the media picker dialog
-        picker_dialog = page.locator(
-            'ytcp-related-video-picker-dialog, '
-            '[data-testid="related-video-picker-dialog"], '
-            'ytcp-dialog:has-text("Related video")'
-        ).first
+        # Method 4: Fallback - click any visible child with role=button inside picker
+        if not picker_dialog:
+            log.info("[YouTube Shorts] Trying fallback click on role=button children...")
+            inner_selectors = [
+                'ytcp-shorts-content-links-picker ytcp-dropdown-trigger[role="button"]',
+                'ytcp-shorts-content-links-picker div[role="button"]',
+                'ytcp-shorts-content-links-picker button',
+            ]
+            for selector in inner_selectors:
+                inner_btn = page.locator(selector).first
+                if inner_btn.count() > 0 and inner_btn.is_visible():
+                    inner_btn.scroll_into_view_if_needed()
+                    try:
+                        inner_btn.click(force=True)
+                        log.info("[YouTube Shorts] Clicked fallback element: %s", selector)
+                        page.wait_for_timeout(2000)
+                        picker_dialog = check_dialog()
+                        if picker_dialog:
+                            break
+                    except Exception: pass
 
-        if picker_dialog.count() == 0:
-            log.warning("[YouTube Shorts] Related video picker dialog did not appear")
+        if not picker_dialog:
+            log.warning("[YouTube Shorts] Related video picker dialog did not appear after ALL click methods")
             return False
 
-        log.info("[YouTube Shorts] Media picker dialog opened")
+        log.info("[YouTube Shorts] Media picker dialog opened successfully!")
 
-        # Search for the parent video by title prefix (Telugu) — YouTube Studio search works on title, not video ID
-        search_input = page.locator(
-            'input[placeholder*="Search" i], '
-            'input[aria-label*="Search" i], '
-            'ytcp-text-input[placeholder*="Search" i]'
-        ).first
+        clean_title = parent_title.strip(' "\'').split('|')[0].strip()[:25]
+        
+        # Find search input WITHIN the picker dialog
+        search_input = None
+        if picker_dialog:
+            search_input = picker_dialog.locator(
+                'input[placeholder*="Search" i], '
+                'input[aria-label*="Search" i], '
+                'ytcp-text-input[placeholder*="Search" i]'
+            ).first
+        
+        if not search_input or search_input.count() == 0:
+            # Fallback to global search
+            search_input = page.locator(
+                'input[placeholder*="Search" i], '
+                'input[aria-label*="Search" i], '
+                'ytcp-text-input[placeholder*="Search" i]'
+            ).first
 
-        if search_input.count() > 0:
-            search_input.click()
-            page.wait_for_timeout(500)
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Backspace")
-            page.wait_for_timeout(300)
-            page.keyboard.insert_text(parent_title[:25])
-            page.wait_for_timeout(3000)
-            log.info("[YouTube Shorts] Searched for title prefix: %s", parent_title[:25])
-        else:
+        if search_input.count() == 0:
             log.warning("[YouTube Shorts] Search input not found in picker dialog")
             return False
 
-        # Select the matching parent video row — match by video_id to ensure correct long-form video
-        video_row = page.locator(
-            f'ytcp-video-row:has-text("{parent_video_id}"), '
-            f'tr:has-text("{parent_video_id}"), '
-            f'[aria-label*="{parent_video_id}"]'
-        ).first
+        # Use JS to focus and fill search input (bypasses modal backdrop)
+        log.info("[YouTube Shorts] Focusing search input via JS...")
+        search_selector = 'input[placeholder*="Search" i], input[aria-label*="Search" i], ytcp-text-input[placeholder*="Search" i]'
+        page.evaluate("""(args) => {
+            const selector = args[0];
+            const text = args[1];
+            const input = document.querySelector(selector);
+            if (input) {
+                input.focus();
+                input.value = '';
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        }""", [search_selector, clean_title])
 
-        if video_row.count() == 0:
-            log.warning("[YouTube Shorts] Video %s not found in picker results", parent_video_id)
+        # Also try typing via keyboard as fallback
+        try:
+            search_input.click(force=True)
+            page.wait_for_timeout(300)
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+            page.wait_for_timeout(200)
+            page.keyboard.insert_text(clean_title)
+            page.keyboard.press("Enter")
+        except Exception:
+            pass
+
+        page.wait_for_timeout(5000)
+        log.info("[YouTube Shorts] Searched for title prefix: %s", clean_title)
+        log.info("[YouTube Shorts] DEBUG: Starting video row selection...")
+        log.info("[YouTube Shorts] DEBUG: Creating video_row locator...")
+
+                # Select the matching parent video row — match by title prefix to ensure correct long-form video
+                # The picker dialog uses ytcp-entity-card for video items
+                # Match by parent_title prefix (first 25 chars) since video_id is not in card attributes
+        title_prefix = parent_title.strip(' "\'').split('|')[0].strip()[:25]
+        log.info("[YouTube Shorts] DEBUG: title_prefix = %s", title_prefix)
+        video_row = page.locator(
+            f'ytcp-entity-card[aria-label*="{title_prefix}"], '
+            f'ytcp-video-row[aria-label*="{title_prefix}"], '
+            f'ytcp-entity-card:has-text("{title_prefix}"), '
+            f'ytcp-video-row:has-text("{title_prefix}"), '
+            f'[aria-label*="{title_prefix}"]'
+        ).first
+        log.info("[YouTube Shorts] DEBUG: video_row locator created, checking count...")
+        try:
+            count = video_row.count()
+            log.info("[YouTube Shorts] DEBUG: video_row count = %d", count)
+        except Exception as e:
+            log.error("[YouTube Shorts] DEBUG: video_row.count() failed: %s", e)
+            count = 0
+
+        log.info("[YouTube Shorts] DEBUG: Proceeding to click (count = %d)", count)
+
+        if count == 0:
+            log.warning("[YouTube Shorts] Video with title prefix '%s' not found in picker results", title_prefix)
             # List available rows for debugging
-            rows = page.locator('ytcp-video-row').all()
-            log.info("[YouTube Shorts] Available rows in picker (%d):", len(rows))
+            rows = page.locator('ytcp-entity-card').all()
+            log.info("[YouTube Shorts] Available entity cards in picker (%d):", len(rows))
             for i, row in enumerate(rows[:10]):
                 try:
                     log.info("  [%d] %s", i, row.inner_text()[:80])
                 except Exception:
                     pass
-            return False
+            # Also try ytcp-video-row
+            rows2 = page.locator('ytcp-video-row').all()
+            log.info("[YouTube Shorts] Available video rows in picker (%d):", len(rows2))
+            for i, row in enumerate(rows2[:10]):
+                try:
+                    log.info("  [%d] %s", i, row.inner_text()[:80])
+                except Exception:
+                    pass
+        return False
 
-        video_row.click()
+        log.info("[YouTube Shorts] Video row found, attempting click...")
+        try:
+            # Try Playwright's force click first
+            video_row.click(force=True, timeout=3000)
+        except Exception:
+            log.info("[YouTube Shorts] Physical click failed, using JavaScript click fallback...")
+            try:
+                video_row.evaluate("el => el.click()")
+            except Exception as js_e:
+                log.warning("[YouTube Shorts] JS click also failed: %s", js_e)
+                return False
+        
         page.wait_for_timeout(2000)
-        log.info("[YouTube Shorts] Selected video %s in picker", parent_video_id)
+        log.info("[YouTube Shorts] Successfully clicked video row in picker")
 
         # Click the Save button
+        log.info("[YouTube Shorts] Looking for Save button...")
         save_btn = page.locator(
             '#save-button, '
             'button:has-text("Save"), '
@@ -1143,7 +1295,11 @@ def set_related_video(page, short_id: str, parent_title: str, parent_video_id: s
             log.warning("[YouTube Shorts] Save button not found in picker dialog")
             return False
 
-        save_btn.click()
+        log.info("[YouTube Shorts] Save button found, clicking...")
+        try:
+            save_btn.click()
+        except Exception as e:
+            log.warning("[YouTube Shorts] Save button click failed: %s", e)
         page.wait_for_timeout(3000)
 
         # Assert save succeeded: look for toast or Save button becoming disabled

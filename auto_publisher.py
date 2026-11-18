@@ -902,10 +902,14 @@ def publish_to_telegram(item: dict, poster_path: str, caption: str, dry_run: boo
     try:
         with open(poster_path, "rb") as img_file:
             files = {"photo": img_file}
+            button = {"text": "Watch Full Video", "url": yt_url}
+            keyboard = [[button]]
+            reply_markup = {"inline_keyboard": keyboard}
             data = {
                 "chat_id": TELEGRAM_CHAT_ID,
                 "caption": caption,
                 "parse_mode": "HTML",  # supports bold, italic, links
+                "reply_markup": json.dumps({"inline_keyboard": [[{"text": "Watch Full Video", "url": yt_url}]]})
             }
             resp = requests.post(url, files=files, data=data, timeout=30)
         result = resp.json()
