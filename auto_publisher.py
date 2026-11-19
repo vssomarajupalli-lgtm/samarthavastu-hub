@@ -272,6 +272,41 @@ def wait_for_internet(timeout_seconds: int = 180) -> bool:
     return False
 
 
+def wait_for_internet_with_retry(max_wait_seconds: int = 300, retry_interval: int = 15) -> bool:
+    """
+    Retry internet connectivity check every retry_interval seconds for up to max_wait_seconds.
+    Designed for scheduled runs (e.g., 08:00 AM) where laptop may be waking from sleep
+    and Wi-Fi needs time to reconnect.
+    Returns True if connectivity established, False if timeout exceeded.
+    """
+    log.info("[Pre-flight] Internet retry mode: checking every %ds for up to %ds...",
+             retry_interval, max_wait_seconds)
+    start_time = time.time()
+    attempt = 0
+    while time.time() - start_time < max_wait_seconds:
+        attempt += 1
+        try:
+            resp = requests.get("https://graph.facebook.com", timeout=5)
+            if resp.status_code in (200, 400, 404):
+                elapsed = time.time() - start_time
+                log.info("[Pre-flight] Internet connectivity verified OK on attempt %d (%.1fs elapsed).",
+                         attempt, elapsed)
+                return True
+        except Exception as exc:
+            log.info("[Pre-flight] Attempt %d: no internet yet (%s)", attempt, exc)
+        
+        if time.time() - start_time >= max_wait_seconds:
+            break
+            
+        log.info("[Pre-flight] Waiting %ds before retry (%d/%ds elapsed)...",
+                 retry_interval, attempt, int(time.time() - start_time))
+        time.sleep(retry_interval)
+    
+    log.error("[Pre-flight] Internet connection check timed out after %ds (%d attempts).",
+              max_wait_seconds, attempt)
+    return False
+
+
 def load_schedule() -> list:
     if not SCHEDULE_FILE.exists():
         log.error("master_schedule.json not found. Run youtube_sync.py first.")
@@ -898,13 +933,15 @@ def publish_to_telegram(item: dict, poster_path: str, caption: str, dry_run: boo
         log.error("[Telegram] %s", err)
         return {"success": False, "message_id": None, "error": err}
 
+    # Build the YouTube URL (same logic as build_telegram_caption)
+    video_id = item.get("video_id", "")
+    is_short = item.get("is_short", False)
+    yt_url = f"https://www.youtube.com/shorts/{video_id}" if is_short else f"https://www.youtube.com/watch?v={video_id}"
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     try:
         with open(poster_path, "rb") as img_file:
             files = {"photo": img_file}
-            button = {"text": "Watch Full Video", "url": yt_url}
-            keyboard = [[button]]
-            reply_markup = {"inline_keyboard": keyboard}
             data = {
                 "chat_id": TELEGRAM_CHAT_ID,
                 "caption": caption,
@@ -1642,14 +1679,14 @@ def main():
             pass
 
     # (c) FAST READINESS — only when work actually remains:
-    #     - Internet check with short timeout (max ~8s, not 180s)
-    #     - Desktop unlock check (max ~30s)
+    #     - Internet check with retry loop (max 5 min, retry every 15s) for wake-from-sleep
+    #     - Desktop unlock check (max ~15s)
     #     - Skip 300s stabilization; use max 30s settle instead
-    if not DRY_RUN:
-        if not wait_for_internet(timeout_seconds=8):
-            log.error("Aborting run due to lack of internet connectivity.")
-            release_publisher_lock()
-            sys.exit(1)
+        if not DRY_RUN:
+            if not wait_for_internet_with_retry(max_wait_seconds=300, retry_interval=15):
+                log.error("Aborting run due to lack of internet connectivity after 5-minute retry.")
+                release_publisher_lock()
+                sys.exit(1)
 
     schedule = load_schedule()
 

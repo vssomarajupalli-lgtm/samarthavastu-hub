@@ -1225,9 +1225,9 @@ def set_related_video(page, short_id: str, parent_title: str, parent_video_id: s
         log.info("[YouTube Shorts] DEBUG: Starting video row selection...")
         log.info("[YouTube Shorts] DEBUG: Creating video_row locator...")
 
-                # Select the matching parent video row — match by title prefix to ensure correct long-form video
-                # The picker dialog uses ytcp-entity-card for video items
-                # Match by parent_title prefix (first 25 chars) since video_id is not in card attributes
+        # Select the matching parent video row — match by title prefix to ensure correct long-form video
+        # The picker dialog uses ytcp-entity-card for video items
+        # Match by parent_title prefix (first 25 chars) since video_id is not in card attributes
         title_prefix = parent_title.strip(' "\'').split('|')[0].strip()[:25]
         log.info("[YouTube Shorts] DEBUG: title_prefix = %s", title_prefix)
         video_row = page.locator(
@@ -1265,19 +1265,63 @@ def set_related_video(page, short_id: str, parent_title: str, parent_video_id: s
                     log.info("  [%d] %s", i, row.inner_text()[:80])
                 except Exception:
                     pass
-        return False
+            return False
 
-        log.info("[YouTube Shorts] Video row found, attempting click...")
+        log.info("[YouTube Shorts] Video row found, attempting robust click sequence...")
+        click_success = False
+        
+        # Step 1: Wait for video_row to be visible and scroll into view
+        video_row.wait_for(state="visible", timeout=10000)
+        video_row.scroll_into_view_if_needed()
+        page.wait_for_timeout(1000)
+        
+        # Step 2: Try Playwright native click with force
         try:
-            # Try Playwright's force click first
-            video_row.click(force=True, timeout=3000)
-        except Exception:
-            log.info("[YouTube Shorts] Physical click failed, using JavaScript click fallback...")
+            video_row.first.click(force=True, timeout=5000)
+            log.info("[YouTube Shorts] Playwright force click succeeded")
+            click_success = True
+        except Exception as e:
+            log.warning("[YouTube Shorts] Playwright force click failed: %s", e)
+        
+        # Step 3: Fallback to mouse coordinate click (bypasses Polymer/Shadow DOM)
+        if not click_success:
             try:
-                video_row.evaluate("el => el.click()")
-            except Exception as js_e:
-                log.warning("[YouTube Shorts] JS click also failed: %s", js_e)
-                return False
+                box = video_row.first.bounding_box()
+                if box:
+                    cx = box["x"] + box["width"] / 2
+                    cy = box["y"] + box["height"] / 2
+                    page.mouse.move(cx, cy)
+                    page.wait_for_timeout(300)
+                    page.mouse.click(cx, cy)
+                    log.info("[YouTube Shorts] Mouse coordinate click at (%.0f, %.0f) succeeded", cx, cy)
+                    click_success = True
+                else:
+                    log.warning("[YouTube Shorts] Could not get bounding box for video_row")
+            except Exception as e:
+                log.warning("[YouTube Shorts] Mouse coordinate click failed: %s", e)
+        
+        # Step 4: Final fallback - JS click with composed event
+        if not click_success:
+            try:
+                video_row.first.evaluate("""el => {
+                    el.click();
+                    // Also dispatch a composed MouseEvent for Polymer/Shadow DOM
+                    const event = new MouseEvent('click', {
+                        view: window,
+                        bubbles: true,
+                        cancelable: true,
+                        composed: true
+                    });
+                    el.dispatchEvent(event);
+                }""")
+                log.info("[YouTube Shorts] JS click with composed event succeeded")
+                click_success = True
+            except Exception as e:
+                log.warning("[YouTube Shorts] JS click with composed event failed: %s", e)
+        
+        if not click_success:
+            log.error("[YouTube Shorts] All click methods failed for video row")
+            return False
         
         page.wait_for_timeout(2000)
         log.info("[YouTube Shorts] Successfully clicked video row in picker")
