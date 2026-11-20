@@ -1065,16 +1065,13 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
     """
     section("STAGE A: PUBLISHING TODAY'S VIDEO TO PUBLIC")
 
-    # Daily Lock Check
-    if not dry_run and not force and check_daily_published_lock(schedule, force=force):
-        return True
-
-    # STRICT DATE LOCK: Only process items scheduled for today
     today_str = datetime.now().strftime("%Y-%m-%d")
-    
-    # Find the target item:
-    # 1. First check if today's item is incomplete across channels (e.g. missing WhatsApp, YouTube Shorts, etc.)
+
+    # OPTION A: Select the single oldest item with status in (preview_approved, pending)
+    # and scheduled_date <= today. Publish only that 1 item.
     target_item = None
+
+    # First, check if there's an incomplete post from today that needs resuming
     for item in schedule:
         pub_at = item.get("published_at") or ""
         scheduled_date = item.get("scheduled_date") or ""
@@ -1084,27 +1081,24 @@ def run_stage_a_public_publish(schedule: list, dry_run: bool = False, force: boo
             log.info("[Stage A] Resuming today's incomplete post: %s (%s)", item["id"], item.get("title", "")[:40])
             break
 
-    # 2. Look for "preview_approved" item with today's scheduled_date
+    # OPTION A: Find oldest pending/approved item with scheduled_date <= today
     if not target_item:
+        candidates = []
         for item in schedule:
             scheduled_date = item.get("scheduled_date") or ""
-            if scheduled_date == today_str and item.get("status") == "preview_approved":
-                target_item = item
-                log.info("[Stage A] Found today's preview_approved item: %s (%s)", item["id"], item.get("title", "")[:40])
-                break
+            status = item.get("status")
+            if scheduled_date <= today_str and status in ("preview_approved", "pending"):
+                candidates.append(item)
 
-    # 3. Fallback: earliest pending with today's scheduled_date
-    if not target_item:
-        for item in schedule:
-            scheduled_date = item.get("scheduled_date") or ""
-            if scheduled_date == today_str and item.get("status") not in ("published", "skipped"):
-                target_item = item
-                log.info("[Stage A] Fallback to earliest pending for today: %s (%s)", item["id"], item.get("title", "")[:40])
-                break
+        if candidates:
+            # Sort by scheduled_date ascending (oldest first)
+            candidates.sort(key=lambda x: x.get("scheduled_date") or "9999-12-31")
+            target_item = candidates[0]
+            log.info("[Stage A] Option A: Selected oldest pending/approved item (scheduled_date <= today): %s (%s)", target_item["id"], target_item.get("title", "")[:40])
 
-    # STRICT: If no item scheduled for today, exit gracefully
+    # STRICT: If no eligible item, exit gracefully
     if not target_item:
-        log.info("[Stage A] No item scheduled for today (%s). Skipping Stage A.", today_str)
+        log.info("[Stage A] No pending/approved item with scheduled_date <= today (%s). Skipping Stage A.", today_str)
         return True
 
     item_id = target_item["id"]
@@ -1622,67 +1616,58 @@ def main():
 
     # --- Single-instance lock: prevent dual-process race condition ---
     if not acquire_publisher_lock():
-        print("[FATAL] Another auto_publisher instance is already running (logs/publisher.lock held). Exiting to prevent race condition.")
-        sys.exit(1)
+            print("[FATAL] Another auto_publisher instance is already running (logs/publisher.lock held). Exiting to prevent race condition.")
+            sys.exit(1)
     try:
-        import atexit
-        atexit.register(release_publisher_lock)
+            import atexit
+            atexit.register(release_publisher_lock)
     except Exception:
-        pass
+            pass
 
     section("Samartha Vastu Publisher" + (" [DRY-RUN]" if DRY_RUN else " [LIVE]"))
 
-    # (b1) Active-hours guard — automatic runs only between 06:00 and 22:00 local time.
-    #      Midnight/late-night task triggers exit silently with ZERO popup and ZERO posts.
+    # 1. ACTIVE TIME WINDOW GUARD (7:00 AM – 9:00 PM IST)
+    # Automatic runs only between 07:00 and 21:00 local time.
+    # Midnight/late-night task triggers exit silently with ZERO popup and ZERO posts.
     if not DRY_RUN and not MANUAL_RUN:
-        now_hour = datetime.now().hour
-        if now_hour < 6 or now_hour >= 22:
-            log.info("[Time Guard] Current time %02d:00 is outside 06:00-22:00 window. Exiting silently (zero popup, zero posts).", now_hour)
-            release_publisher_lock()
-            return
+            now_hour = datetime.now().hour
+            if now_hour < 7 or now_hour >= 21:
+                log.info("[Guard] Outside active publishing window (07:00-21:00). Exiting cleanly.")
+                release_publisher_lock()
+                return
 
-    # (b) INSTANT IDLENESS GATE — < 1s silent exit if everything is already done.
-    #      Check BEFORE any wait, before any Chrome launch, before any prompt.
+    # 2. MAX 1 POST PER DAY GUARD
+    # Check if ANY item already has status == "published" with published_at matching today's date.
     if not DRY_RUN:
-        schedule_for_lock = load_schedule()
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        today_item = None
-        for item in schedule_for_lock:
-            pub_at = item.get("published_at") or ""
-            if pub_at.startswith(today_str) and item.get("status") == "published":
-                today_item = item
-                break
-        if today_item:
-            # Check ALL 7 channels complete + Stage B preview sent today
-            has_fb = bool(today_item.get("fb_post_url"))
-            has_ig = bool(today_item.get("ig_post_url"))
-            has_yt = bool(today_item.get("yt_short_url"))
-            has_wa_grp = bool(today_item.get("wa_group_sent"))
-            has_wa_adm = bool(today_item.get("wa_admin_sent"))
-            has_tg = bool(today_item.get("tg_sent"))
-            has_wa = bool(today_item.get("wa_sent") or (has_wa_grp and has_wa_adm))
-            preview_sent_today = today_item.get("preview_sent_date") == today_str
-            if has_fb and has_ig and has_yt and has_wa and has_tg and preview_sent_today:
-                log.info("[Time Guard] Today's item %s is 100%% complete across ALL channels. Exiting silently in <1s.", today_item.get("id"))
+            schedule_for_guard = load_schedule()
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            today_published = False
+            for item in schedule_for_guard:
+                pub_at = item.get("published_at") or ""
+                if pub_at.startswith(today_str) and item.get("status") == "published":
+                    today_published = True
+                    break
+            if today_published:
+                log.info("[Guard] Today's daily post quota (1/day) is already fulfilled. Exiting cleanly.")
                 release_publisher_lock()
                 return
 
     # (b2) Daily Snooze — if user clicked No earlier today on an automatic run,
     #      exit silently in <1s so the Scheduled Task stops re-prompting.
     if not DRY_RUN and not MANUAL_RUN:
-        declined_file = LOGS_DIR / "declined_today.txt"
-        try:
-            if declined_file.exists() and declined_file.read_text(encoding="utf-8").strip() == datetime.now().strftime("%Y-%m-%d"):
-                release_publisher_lock()
-                return
-        except Exception:
-            pass
+            declined_file = LOGS_DIR / "declined_today.txt"
+            try:
+                if declined_file.exists() and declined_file.read_text(encoding="utf-8").strip() == datetime.now().strftime("%Y-%m-%d"):
+                    release_publisher_lock()
+                    return
+            except Exception:
+                pass
 
     # (c) FAST READINESS — only when work actually remains:
     #     - Internet check with retry loop (max 5 min, retry every 15s) for wake-from-sleep
     #     - Desktop unlock check (max ~15s)
     #     - Skip 300s stabilization; use max 30s settle instead
-        if not DRY_RUN:
+    if not DRY_RUN:
             if not wait_for_internet_with_retry(max_wait_seconds=300, retry_interval=15):
                 log.error("Aborting run due to lack of internet connectivity after 5-minute retry.")
                 release_publisher_lock()
@@ -1692,19 +1677,19 @@ def main():
 
     # (c2) Desktop unlock check (fast: max ~15s)
     if not DRY_RUN:
-        if not wait_for_unlocked_desktop(timeout_sec=15):
-            log.error("[Desktop Watcher] Could not proceed — desktop remained locked.")
-            release_publisher_lock()
-            sys.exit(1)
+            if not wait_for_unlocked_desktop(timeout_sec=15):
+                log.error("[Desktop Watcher] Could not proceed — desktop remained locked.")
+                release_publisher_lock()
+                sys.exit(1)
 
-    # (d1) Re-check active-hours after readiness — if time crossed 22:00,
+    # (d1) Re-check active-hours after readiness — if time crossed 21:00,
     #      exit silently with ZERO popup before showing confirmation.
     if not DRY_RUN and not MANUAL_RUN:
-        now_hour = datetime.now().hour
-        if now_hour >= 22:
-            log.info("[Time Guard] Current time %02d:00 is at/after 22:00 after readiness wait. Exiting silently.", now_hour)
-            release_publisher_lock()
-            return
+            now_hour = datetime.now().hour
+            if now_hour >= 21:
+                log.info("[Time Guard] Current time %02d:00 is at/after 21:00 after readiness wait. Exiting silently.", now_hour)
+                release_publisher_lock()
+                return
 
     # (e) Show topmost Yes/No MessageBox BEFORE Facebook or Instagram runs.
     target_item_for_dialog = None
