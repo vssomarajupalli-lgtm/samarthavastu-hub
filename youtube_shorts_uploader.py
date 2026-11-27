@@ -617,21 +617,43 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             if DISALLOWED_CHANNEL in current_url or "@rajusvsn8246" in current_url:
                 raise RuntimeError(f"ABORTED: Connected to disallowed channel {DISALLOWED_CHANNEL} (@rajusvsn8246).")
 
-            # Try to find and click "Edit draft" for this video's title
+            # Try to find an existing Short/draft row for this video's title
             draft_title = item.get("title", "")
             edit_clicked = False
+            visibility_text = ""
             try:
-                # Find row containing the draft title (regardless of Draft/Private visibility)
+                # Find row containing the draft title (regardless of Draft/Private/Public visibility)
                 row = page.locator(f'ytcp-video-row:has-text("{draft_title[:40]}"), tr:has-text("{draft_title[:40]}")').first
                 if row.count() > 0 and row.is_visible():
-                    # Check visibility badge - proceed for both Draft and Private
+                    # Check visibility badge
                     row_text = row.inner_text() or ""
-                    visibility_text = ""
                     for vw in ["Private", "Draft", "Public", "Unlisted", "Scheduled"]:
                         if vw.lower() in row_text.lower():
                             visibility_text = vw
                             break
-                    log.info("[YouTube Shorts] Found existing draft with visibility='%s': %s", visibility_text, draft_title[:40])
+                    log.info("[YouTube Shorts] Found existing Short/draft with visibility='%s': %s", visibility_text, draft_title[:40])
+
+                    if visibility_text.lower() == "public":
+                        short_url = _extract_short_url_from_row(row)
+                        if not short_url:
+                            # Open video details and extract ID from URL or sidebar links
+                            title_link = row.locator('a#video-title, a[href*="/video/"]').first
+                            if title_link.count() > 0 and title_link.is_visible():
+                                title_link.click()
+                            else:
+                                row.click()
+                            page.wait_for_timeout(3000)
+                            short_url = _extract_short_url_from_url(page.url) or _extract_short_url(page)
+                        if not short_url and item.get("is_short") and re.fullmatch(r'[a-zA-Z0-9_-]{11}', str(item.get("video_id") or "")):
+                            short_url = f"https://www.youtube.com/shorts/{item['video_id']}"
+                        if short_url:
+                            log.info("[YouTube Shorts] Existing Short is already Public: %s", short_url)
+                            short_id = short_url.split("/shorts/")[-1].split("?")[0]
+                            parent_video_id = item.get("video_id", "")
+                            if parent_video_id and parent_video_id != short_id and not item.get("is_short"):
+                                set_related_video(page, short_id, item.get("title", ""), parent_video_id)
+                            page.close()
+                            return {"success": True, "short_url": short_url, "already_uploaded": True}
 
                     edit_btn = row.locator('[aria-label="Edit"], ytcp-button:has-text("Edit"), button:has-text("Edit"), ytcp-button:has-text("Edit draft"), button:has-text("Edit draft")').first
                     if edit_btn.count() > 0 and edit_btn.is_visible():
@@ -664,8 +686,18 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             page.wait_for_timeout(5000)
 
             # ── Step 2: Fill Short Title (Telugu) into the Details modal ──────
-            title_box = page.locator('#title-textarea #textbox, #title-textarea input, div#textbox[role="textbox"]').first
-            title_box.wait_for(state="visible", timeout=30000)
+            title_selector = '#title-textarea #textbox, #title-textarea input, ytcp-video-title #textbox, ytcp-social-suggestions-textbox#title-textarea #textbox, div#textbox[role="textbox"]'
+            title_box = page.locator(title_selector).first
+            try:
+                title_box.wait_for(state="visible", timeout=30000)
+            except Exception:
+                # Fallback if Studio already opened a published video's details page
+                fallback_url = _extract_short_url_from_url(page.url) or _extract_short_url(page)
+                if fallback_url:
+                    log.info("[YouTube Shorts] Captured existing Short URL from details page: %s", fallback_url)
+                    page.close()
+                    return {"success": True, "short_url": fallback_url, "already_uploaded": True}
+                raise
             title_box.click(force=True)
             page.wait_for_timeout(500)
             page.keyboard.press("Control+A")
@@ -673,14 +705,14 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
             page.wait_for_timeout(300)
             # Use document.execCommand('insertText') — YouTube Studio's Lexical editor
             # ignores page.keyboard.insert_text() and page.keyboard.type().
-            exec_result = page.evaluate("""(text) => {
-                const el = document.querySelector('#title-textarea #textbox, #title-textarea input, div#textbox[role="textbox"]');
+            exec_result = page.evaluate("""([selector, text]) => {
+                const el = document.querySelector(selector);
                 if (!el) return { success: false, error: 'element not found' };
                 el.focus();
                 document.execCommand('selectAll', false, null);
                 const ok = document.execCommand('insertText', false, text);
                 return { success: ok, innerText: el.innerText };
-            }""", short_title)
+            }""", [title_selector, short_title])
             page.wait_for_timeout(1000)
             # Blur/tabs out to let YouTube register the change
             title_box.press("Tab")
@@ -697,14 +729,14 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Backspace")
                 page.wait_for_timeout(300)
-                page.evaluate("""(text) => {
-                    const el = document.querySelector('#title-textarea #textbox, #title-textarea input, div#textbox[role="textbox"]');
+                page.evaluate("""([selector, text]) => {
+                    const el = document.querySelector(selector);
                     if (!el) return { success: false, error: 'element not found' };
                     el.focus();
                     document.execCommand('selectAll', false, null);
                     const ok = document.execCommand('insertText', false, text);
                     return { success: ok, innerText: el.innerText };
-                }""", short_title)
+                }""", [title_selector, short_title])
                 page.wait_for_timeout(1000)
                 title_box.press("Tab")
                 page.wait_for_timeout(1000)
@@ -1000,6 +1032,34 @@ def upload_short_to_youtube(item: dict, dry_run: bool = False) -> dict:
 
     log.info("[YouTube Shorts] Upload complete! Short URL: %s", short_url)
     return {"success": True, "short_url": short_url}
+
+
+def _extract_short_url_from_url(url: str) -> str | None:
+    """Extract a youtube.com/shorts/<11-char-id> URL from a Studio or YouTube URL."""
+    if not url:
+        return None
+    m = re.search(r'/(?:shorts|video)/([a-zA-Z0-9_-]{11})', url)
+    if m:
+        return f"https://www.youtube.com/shorts/{m.group(1)}"
+    return None
+
+
+def _extract_short_url_from_row(row) -> str | None:
+    """Extract a youtube.com/shorts/<11-char-id> URL from a Studio video row."""
+    try:
+        html = row.inner_html() or ""
+        for pat in (
+            r'youtube\.com/shorts/([a-zA-Z0-9_-]{11})',
+            r'youtu\.be/([a-zA-Z0-9_-]{11})',
+            r'/video/([a-zA-Z0-9_-]{11})',
+            r'/vi/([a-zA-Z0-9_-]{11})',
+        ):
+            m = re.search(pat, html)
+            if m:
+                return f"https://www.youtube.com/shorts/{m.group(1)}"
+    except Exception:
+        pass
+    return None
 
 
 def _extract_short_url(page) -> str | None:
