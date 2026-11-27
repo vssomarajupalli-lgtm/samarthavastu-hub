@@ -1,0 +1,15 @@
+certifi==2026.11.20
+charset-normalizer==3.5.3
+colorama==0.4.6
+greenlet==3.5.6
+idna==3.20
+pillow==11.3.0
+playwright==1.61.0
+psutil==7.2.2
+pyee==13.0.1
+python-dotenv==1.2.2
+qrcode==8.2
+requests==2.33.0
+typing_extensions==4.16.0
+urllib3==2.8.0
+yt-dlp==2026.10.21

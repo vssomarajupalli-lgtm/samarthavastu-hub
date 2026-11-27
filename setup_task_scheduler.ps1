@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 
 $TaskName = "SamarthaVastu_AutoPublisher"
 $ScriptPath = "E:\samarthavastu-hub\auto_publisher.py"
-$PythonwExe = "C:\Users\vssom\AppData\Local\hermes\hermes-agent\venv\Scripts\pythonw.exe"
+$PythonwExe = "E:\samarthavastu-hub\.venv\Scripts\pythonw.exe"
 if (-not (Test-Path $PythonwExe)) {
     throw "pythonw.exe not found at $PythonwExe"
 }
