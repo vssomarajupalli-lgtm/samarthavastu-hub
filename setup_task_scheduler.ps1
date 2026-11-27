@@ -4,9 +4,8 @@
 $ErrorActionPreference = "Stop"
 
 $TaskName = "SamarthaVastu_AutoPublisher"
-$ScriptPath = "E:\samarthavastu-hubuto_publisher.py"
-$PythonExe = (Get-Command python).Source  # Use current python from PATH
-$PythonwExe = Join-Path (Split-Path $PythonExe -Parent) "pythonw.exe"
+$ScriptPath = "E:\samarthavastu-hub\auto_publisher.py"
+$PythonwExe = "C:\Users\vssom\AppData\Local\hermes\hermes-agent\venv\Scripts\pythonw.exe"
 if (-not (Test-Path $PythonwExe)) {
     throw "pythonw.exe not found at $PythonwExe"
 }

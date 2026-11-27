@@ -51,6 +51,10 @@ import random
 import re
 import subprocess
 import sys
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -188,7 +192,7 @@ def show_confirmation_dialog(video_title: str, completed_channels: int = 0, tota
             0,
             f"Publish queued video now?\n\nTitle: {video_title}\n\n{status_line}\n\n[Yes] = Proceed with publishing\n[No] = Cancel and keep item in queue for next session",
             "Samartha Vastu - Publishing Confirmation",
-            0x00000004 | 0x00000020 | 0x00010000 | 0x00010000,  # MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND
+            0x00000004 | 0x00000020 | 0x00040000 | 0x00010000,  # MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND
         )
         if result == 6:  # IDYES = 6
             return True
@@ -1638,7 +1642,7 @@ def main():
 
     # 2. MAX 1 POST PER DAY GUARD
     # Check if ANY item already has status == "published" with published_at matching today's date.
-    if not DRY_RUN:
+    if not DRY_RUN and not args.force:
             schedule_for_guard = load_schedule()
             today_str = datetime.now().strftime("%Y-%m-%d")
             today_published = False
